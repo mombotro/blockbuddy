@@ -1,0 +1,14 @@
+{
+  "name": "blockbuddy",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Simple 3D block modeler for kids. Exports GLB for three.js.",
+  "scripts": {
+    "build": "esbuild src/main.js --bundle --minify --format=iife --outfile=blockbuddy.js",
+    "dev": "esbuild src/main.js --bundle --format=iife --outfile=blockbuddy.js --watch"
+  },
+  "dependencies": {
+    "esbuild": "^0.28.2",
+    "three": "^0.186.1"
+  }
+}
