@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { makeGeometry, mirroredGeometry, mirrorInto, refreshGeometry, shapeLabel } from './geom.js';
 import { makeMaterial } from './textures.js';
+import { attachFaces, facesToTris, trisToFaces } from './editmesh.js';
 
 // A model is a tree of nodes:
 //   joint = empty Object3D (a bone you can pose)
@@ -249,6 +250,7 @@ export function serializeNode(n) {
     d.image = u.image;
     d.texScale = u.texScale;
     d.verts = r4(n.geometry.attributes.position.array);
+    d.faces = facesToTris(n.geometry);
   }
   return d;
 }
@@ -264,6 +266,8 @@ export function deserialize(d, parent, opt = {}) {
   } else {
     const g = new THREE.BufferGeometry();
     g.setAttribute('position', new THREE.BufferAttribute(new Float32Array(d.verts), 3));
+    // old save files have no face ids: work them out from the shape
+    attachFaces(g, d.faces && d.faces.length * 9 === d.verts.length ? trisToFaces(d.faces) : null);
     refreshGeometry(g, d.texScale);
     n = new THREE.Mesh(g, makeMaterial(d));
     n.userData = {

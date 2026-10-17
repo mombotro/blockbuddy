@@ -7,7 +7,6 @@ import {
   refreshGeometry,
   geometrySize,
   bakeScale,
-  groupVertices,
   sliceGeometry,
   gapMiddle,
 } from './geom.js';
@@ -41,6 +40,7 @@ import {
   isInside,
 } from './nodes.js';
 import { STARTERS, posesFor } from './rigs.js';
+import { buildTopology, extrudeFaces, extrudeEdge, ensureFaces, keyOf } from './editmesh.js';
 
 const $ = (s) => document.querySelector(s);
 const PALETTE = [
@@ -81,8 +81,6 @@ scene.add(model);
 const transform = new TransformControls(camera, canvas);
 transform.size = 0.9;
 scene.add(transform.getHelper());
-const handleRoot = new THREE.Group();
-scene.add(handleRoot);
 
 function resize() {
   const r = $('#stage').getBoundingClientRect();
@@ -96,6 +94,8 @@ new ResizeObserver(resize).observe($('#stage'));
 const state = {
   mode: 'build', // build | pose
   tool: 'move', // move | turn | size | points
+  emode: 'dot', // inside points: dot | edge | face
+  pgizmo: 'move', // inside points: move | turn | size
   selected: null,
   rig: null,
   snap: true,
@@ -108,9 +108,6 @@ const state = {
 };
 
 let outline = null;
-let handles = [];
-let handleGroups = [];
-let selHandle = null;
 let drag = null;
 
 // ---------------------------------------------------------------- history (undo/redo)
@@ -143,7 +140,7 @@ function commit() {
 }
 function clearModel() {
   setOutline(null);
-  clearHandles();
+  clearPoints();
   transform.detach();
   for (const c of [...model.children]) {
     c.traverse((o) => {
@@ -192,42 +189,154 @@ function setOutline(part) {
     part.add(outline);
   }
 }
-function clearHandles() {
-  for (const h of handles) {
-    handleRoot.remove(h);
-    h.material.dispose();
+// ---------------------------------------------------------------- points mode: dots, edges, faces
+// All the dots / edge diamonds / face squares are children of the part (so they follow it).
+// Whatever is picked is moved by one gizmo (the "pivot") sitting at its middle.
+const HANDLE_COLOR = { dot: 0xffffff, edge: 0x7dd3fc, face: 0x86efac };
+const SEL_COLOR = 0xf97316;
+const handleGeos = {
+  dot: new THREE.SphereGeometry(0.024, 10, 8),
+  edge: new THREE.OctahedronGeometry(0.032),
+  face: new THREE.BoxGeometry(0.046, 0.046, 0.046),
+};
+const pivot = new THREE.Object3D();
+scene.add(pivot);
+let pts = null; // { part, geo, mode, topo, els, root, handles, lines, sel }
+let psel = []; // picked elements (indexes into pts.els)
+
+function clearPoints() {
+  if (pts) {
+    pts.root.parent && pts.root.parent.remove(pts.root);
+    pts.root.traverse((o) => {
+      if (o.material) o.material.dispose();
+      if (o.userData.ownGeo) o.geometry.dispose();
+    });
   }
-  handles = [];
-  handleGroups = [];
-  selHandle = null;
+  pts = null;
+  psel = [];
 }
-const handleGeo = new THREE.SphereGeometry(0.022, 10, 8);
-function buildHandles(part) {
-  clearHandles();
-  handleGroups = groupVertices(part.geometry);
-  part.updateWorldMatrix(true, false);
-  const p = part.geometry.attributes.position;
-  handleGroups.forEach((idxs, gi) => {
+const posOf = (gi) => {
+  const a = pts.part.geometry.attributes.position;
+  const i = pts.topo.groups[gi][0];
+  return new THREE.Vector3(a.getX(i), a.getY(i), a.getZ(i));
+};
+function elCenter(el) {
+  const c = new THREE.Vector3();
+  el.gs.forEach((gi) => c.add(posOf(gi)));
+  return c.divideScalar(el.gs.length);
+}
+const lineMat = (color) => new THREE.LineBasicMaterial({ color, depthTest: false, transparent: true });
+function buildPoints(part) {
+  clearPoints();
+  ensureFaces(part.geometry);
+  const topo = buildTopology(part.geometry);
+  const root = new THREE.Group();
+  root.userData.helper = true;
+  part.add(root);
+  const els = topo[state.emode === 'dot' ? 'dots' : state.emode === 'edge' ? 'edges' : 'faces'];
+  pts = { part, geo: part.geometry, mode: state.emode, topo, els, root, handles: [], lines: null, sel: null };
+  if (state.emode === 'edge') {
+    const lg = new THREE.BufferGeometry();
+    lg.setAttribute('position', new THREE.BufferAttribute(new Float32Array(els.length * 6), 3));
+    pts.lines = new THREE.LineSegments(lg, lineMat(HANDLE_COLOR.edge));
+    pts.lines.userData = { helper: true, ownGeo: true };
+    pts.lines.renderOrder = 25;
+    pts.lines.frustumCulled = false;
+    root.add(pts.lines);
+  }
+  els.forEach((el, i) => {
     const m = new THREE.Mesh(
-      handleGeo,
-      new THREE.MeshBasicMaterial({ color: 0xffffff, depthTest: false, transparent: true }),
+      handleGeos[state.emode],
+      new THREE.MeshBasicMaterial({ color: HANDLE_COLOR[state.emode], depthTest: false, transparent: true }),
     );
     m.renderOrder = 30;
-    m.position.set(p.getX(idxs[0]), p.getY(idxs[0]), p.getZ(idxs[0])).applyMatrix4(part.matrixWorld);
-    m.userData = { handle: true, gi };
-    handleRoot.add(m);
-    handles.push(m);
+    m.userData = { helper: true, pel: i };
+    root.add(m);
+    pts.handles.push(m);
   });
+  updatePoints();
 }
-function selectHandle(h) {
-  selHandle = h;
-  handles.forEach((x) => x.material.color.set(x === h ? 0xf97316 : 0xffffff));
-  if (h) {
-    transform.attach(h);
-    transform.setMode('translate');
-    transform.setSpace('world');
-  } else transform.detach();
+// reposition everything after the shape or the picks changed
+function updatePoints() {
+  if (!pts) return;
+  const { els, handles, lines } = pts;
+  els.forEach((el, i) => {
+    handles[i].position.copy(elCenter(el));
+    handles[i].material.color.set(psel.includes(i) ? SEL_COLOR : HANDLE_COLOR[pts.mode]);
+    handles[i].scale.setScalar(psel.includes(i) ? 1.35 : 1);
+  });
+  if (lines) {
+    const a = lines.geometry.attributes.position;
+    els.forEach((el, i) => {
+      const p0 = posOf(el.gs[0]);
+      const p1 = posOf(el.gs[1]);
+      a.setXYZ(i * 2, p0.x, p0.y, p0.z);
+      a.setXYZ(i * 2 + 1, p1.x, p1.y, p1.z);
+    });
+    a.needsUpdate = true;
+  }
+  if (pts.sel) {
+    pts.root.remove(pts.sel);
+    pts.sel.geometry.dispose();
+    pts.sel.material.dispose();
+    pts.sel = null;
+  }
+  if (psel.length && pts.mode === 'face') {
+    const pos = [];
+    const g = pts.part.geometry.attributes.position;
+    for (const i of psel)
+      for (const t of els[i].tris) for (let k = 0; k < 3; k++) pos.push(g.getX(t * 3 + k), g.getY(t * 3 + k), g.getZ(t * 3 + k));
+    const sg = new THREE.BufferGeometry();
+    sg.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+    pts.sel = new THREE.Mesh(
+      sg,
+      new THREE.MeshBasicMaterial({ color: SEL_COLOR, transparent: true, opacity: 0.45, depthTest: false, side: THREE.DoubleSide }),
+    );
+    pts.sel.renderOrder = 22;
+  } else if (psel.length && pts.mode === 'edge') {
+    const pos = [];
+    for (const i of psel) pos.push(...posOf(els[i].gs[0]).toArray(), ...posOf(els[i].gs[1]).toArray());
+    const sg = new THREE.BufferGeometry();
+    sg.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+    pts.sel = new THREE.LineSegments(sg, lineMat(SEL_COLOR));
+    pts.sel.renderOrder = 26;
+    pts.sel.frustumCulled = false;
+  }
+  if (pts.sel) {
+    pts.sel.userData = { helper: true, ownGeo: true };
+    pts.root.add(pts.sel);
+  }
+}
+function selectEls(list, additive) {
+  if (!pts) return;
+  if (!additive) psel = [];
+  for (const i of list) {
+    const k = psel.indexOf(i);
+    if (k >= 0) {
+      if (additive) psel.splice(k, 1);
+    } else psel.push(i);
+  }
+  updatePoints();
+  attachPivot();
   renderToolbar();
+}
+const selGroups = () => [...new Set(psel.flatMap((i) => pts.els[i].gs))];
+function attachPivot() {
+  if (!pts || !psel.length) {
+    transform.detach();
+    return;
+  }
+  const gs = selGroups();
+  const c = new THREE.Vector3();
+  gs.forEach((gi) => c.add(posOf(gi)));
+  c.divideScalar(gs.length);
+  pts.part.updateWorldMatrix(true, false);
+  pivot.position.copy(pts.part.localToWorld(c));
+  pivot.quaternion.identity();
+  pivot.scale.set(1, 1, 1);
+  transform.attach(pivot);
+  transform.setMode(state.pgizmo === 'turn' ? 'rotate' : state.pgizmo === 'size' ? 'scale' : 'translate');
+  transform.setSpace('world');
 }
 
 function select(node) {
@@ -244,7 +353,7 @@ const nearestJoint = (n) => {
 function applyTool() {
   const n = state.selected;
   setOutline(n);
-  clearHandles();
+  if (!(state.mode === 'build' && state.tool === 'points' && n && isPart(n))) clearPoints();
   for (const j of jointsList()) setMarkerColor(j, j === n ? 0xff4d00 : 0xff9f1c);
   transform.setTranslationSnap(state.snap ? 0.05 : null);
   transform.setRotationSnap(state.snap ? THREE.MathUtils.degToRad(15) : null);
@@ -266,8 +375,9 @@ function applyTool() {
     return;
   }
   if (state.tool === 'points') {
-    transform.detach();
-    buildHandles(n);
+    if (!pts || pts.part !== n || pts.geo !== n.geometry || pts.mode !== state.emode) buildPoints(n);
+    else updatePoints();
+    attachPivot();
     return;
   }
   transform.attach(n);
@@ -287,11 +397,15 @@ function onDragStart() {
   const o = transform.object;
   drag = { obj: o };
   if (o && isJoint(o) && state.mode === 'build') drag.held = kids(o).map((k) => [k, worldOf(k)]);
+  if (o === pivot && pts) {
+    pts.part.updateWorldMatrix(true, false);
+    drag.pts = { C: pivot.position.clone(), W0: selGroups().map((gi) => [gi, pts.part.localToWorld(posOf(gi))]) };
+  }
 }
 function onObjectChange() {
   const o = transform.object;
   if (!o) return;
-  if (o.userData.handle) return onHandleChange(o);
+  if (o === pivot) return onPivotChange();
   if (state.mode === 'pose') return;
   if (isJoint(o)) {
     if (drag && drag.held) drag.held.forEach(([k, W]) => setWorld(k, W));
@@ -299,22 +413,32 @@ function onObjectChange() {
     syncTwin(o);
   } else syncTwin(o);
 }
-function onHandleChange(h) {
-  const part = state.selected;
+function onPivotChange() {
+  if (!pts || !drag || !drag.pts) return;
+  const part = pts.part;
   part.updateWorldMatrix(true, false);
-  const v = part.worldToLocal(h.position.clone());
-  const p = part.geometry.attributes.position;
-  for (const i of handleGroups[h.userData.gi]) p.setXYZ(i, v.x, v.y, v.z);
+  const { C, W0 } = drag.pts;
+  const a = part.geometry.attributes.position;
+  const w = new THREE.Vector3();
+  for (const [gi, W] of W0) {
+    if (state.pgizmo === 'turn') w.copy(W).sub(C).applyQuaternion(pivot.quaternion).add(C);
+    else if (state.pgizmo === 'size') w.copy(W).sub(C).multiply(pivot.scale).add(C);
+    else w.copy(W).add(pivot.position).sub(C);
+    const l = part.worldToLocal(w.clone());
+    for (const i of pts.topo.groups[gi]) a.setXYZ(i, l.x, l.y, l.z);
+  }
   refreshGeometry(part.geometry, part.userData.texScale);
   syncTwin(part);
+  updatePoints();
   setOutline(part);
 }
 function onDragEnd() {
   const o = drag && drag.obj;
   drag = null;
   if (!o || state.mode === 'pose') return;
-  if (o.userData.handle) {
+  if (o === pivot) {
     commit();
+    attachPivot();
     return;
   }
   if (isPart(o) && !(o.scale.x === 1 && o.scale.y === 1 && o.scale.z === 1)) {
@@ -360,9 +484,18 @@ function pick(e) {
     else toast('Nothing picked. Nothing changed.');
     return refresh();
   }
-  if (state.tool === 'points' && state.mode === 'build' && handles.length) {
-    const hit = ray.intersectObjects(handles, false)[0];
-    if (hit) return selectHandle(hit.object);
+  if (state.tool === 'points' && state.mode === 'build' && pts) {
+    const hit = ray.intersectObjects(pts.handles, false)[0];
+    if (hit) return selectEls([hit.object.userData.pel], e.shiftKey);
+    if (state.emode === 'face') {
+      // click right on a face of the shape
+      const sh = ray.intersectObject(pts.part, false)[0];
+      if (sh) {
+        const id = pts.part.geometry.attributes.face.getX(sh.faceIndex * 3);
+        const idx = pts.els.findIndex((f) => f.id === id);
+        if (idx >= 0) return selectEls([idx], e.shiftKey);
+      }
+    }
   }
   if (flags.bones) {
     const ms = jointsList().map((j) => j.userData.marker).filter((m) => m && m.visible);
@@ -373,7 +506,7 @@ function pick(e) {
   model.traverse((o) => isPart(o) && parts.push(o));
   const hit = ray.intersectObjects(parts, false)[0];
   if (hit) return select(hit.object);
-  if (state.tool === 'points' && selHandle) return selectHandle(null);
+  if (state.tool === 'points' && psel.length) return selectEls([], false);
   select(null);
 }
 
@@ -441,6 +574,44 @@ function cancelStick() {
   state.sticking = null;
   applyBoneVisibility();
   refresh();
+}
+// Extrude: push picked faces out (with side walls), or pull a flap out of one edge.
+function extrudeSel() {
+  if (!pts || !psel.length) return toast('Pick a face or an edge first! ▣');
+  const part = pts.part;
+  const g = part.geometry;
+  const sz = geometrySize(g);
+  const dist = Math.max(0.05, 0.25 * Math.min(...sz));
+  let res;
+  let faceIds = null;
+  if (state.emode === 'face') {
+    faceIds = new Set(psel.map((i) => pts.els[i].id));
+    res = extrudeFaces(g, faceIds, dist);
+  } else if (state.emode === 'edge') {
+    if (psel.length !== 1) return toast('Extrude one edge at a time.');
+    const [a, b] = pts.els[psel[0]].gs;
+    res = extrudeEdge(g, posOf(a), posOf(b), dist);
+  } else return toast('Extrude works on faces ▣ and edges ➖. Switch the mode below.');
+  if (!res) return;
+  const ng = new THREE.BufferGeometry();
+  ng.setAttribute('position', new THREE.BufferAttribute(res.position, 3));
+  ng.setAttribute('face', new THREE.BufferAttribute(res.face, 1));
+  refreshGeometry(ng, part.userData.texScale);
+  g.dispose();
+  part.geometry = ng;
+  syncTwin(part, true);
+  commit(); // rebuilds the handles for the new shape
+  if (pts) {
+    if (faceIds) selectEls(pts.els.map((el, i) => (faceIds.has(el.id) ? i : -1)).filter((i) => i >= 0), false);
+    else {
+      const i = pts.els.findIndex((el) => {
+        const ks = el.gs.map((gi) => keyOf(posOf(gi)));
+        return res.keys.every((k) => ks.includes(k));
+      });
+      if (i >= 0) selectEls([i], false);
+    }
+  }
+  toast('Extruded! Drag the arrows to pull it out. ⬆️');
 }
 // Loop cut: add a new ring of dots across the width, height or depth of a part.
 function sliceSelected(axis) {
@@ -738,6 +909,22 @@ function renderToolbar() {
     html = `<span class="label">👆 Click a shape to pick it</span>`;
   } else if (isJoint(n)) {
     html = `<span class="label">🦴 ${esc(n.name)} — drag arrows to move the bone</span>`;
+  } else if (state.tool === 'points') {
+    const em = (id, icon, l) =>
+      `<button class="tool ${state.emode === id ? 'on' : ''}" data-act="emode:${id}"><span>${icon}</span>${l}</button>`;
+    const gz = (id, icon, l) =>
+      `<button class="tool ${state.pgizmo === id ? 'on' : ''}" data-act="pgz:${id}"><span>${icon}</span>${l}</button>`;
+    const can = pts && psel.length && state.emode !== 'dot';
+    const hint = psel.length
+      ? `${psel.length} picked`
+      : state.emode === 'face' ? 'Click a face' : state.emode === 'edge' ? 'Click a diamond' : 'Click a dot';
+    html =
+      `<button class="tool" data-act="tool:move"><span>◀</span>Done</button><i class="sep"></i>` +
+      em('dot', '⚪', 'Dots') + em('edge', '➖', 'Edges') + em('face', '▣', 'Faces') +
+      `<i class="sep"></i>` +
+      gz('move', '↔️', 'Move') + gz('turn', '🔄', 'Turn') + gz('size', '⤡', 'Size') +
+      `<i class="sep"></i><button class="tool" data-act="extrude" ${can ? '' : 'disabled'}><span>⬆️</span>Extrude</button>` +
+      `<span class="label full">${hint} · Shift = pick more</span>`;
   } else {
     const t = (id, icon, label) =>
       `<button class="tool ${state.tool === id ? 'on' : ''}" data-act="tool:${id}"><span>${icon}</span>${label}</button>`;
@@ -745,10 +932,7 @@ function renderToolbar() {
       t('move', '↔️', 'Move') +
       t('turn', '🔄', 'Turn') +
       t('size', '⤡', 'Size') +
-      t('points', '✏️', 'Points') +
-      (state.tool === 'points'
-        ? `<span class="label">${selHandle ? 'Drag the arrows' : 'Click a white dot'}</span>`
-        : '');
+      t('points', '✏️', 'Points');
   }
   el.innerHTML = html;
   el.classList.toggle('hidden', false);
@@ -864,6 +1048,13 @@ document.addEventListener('click', (e) => {
       if (n && isPart(n)) stickTo(n, model);
       return;
     case 'slice': return sliceSelected(+arg);
+    case 'emode':
+      state.emode = arg;
+      return refresh();
+    case 'pgz':
+      state.pgizmo = arg;
+      return refresh();
+    case 'extrude': return extrudeSel();
     case 'mirror': return makeMirror();
     case 'unlink':
       if (n) unlink(n);
@@ -949,9 +1140,15 @@ window.addEventListener('keydown', (e) => {
   } else if (mod && e.key.toLowerCase() === 'y') {
     e.preventDefault();
     redo();
-  } else if (e.key === 'Delete' || e.key === 'Backspace') del();
+  } else if (e.key === 'Delete' || e.key === 'Backspace') state.tool !== 'points' && del();
   else if (e.key === 'Escape') (state.sticking ? cancelStick() : select(null));
-  else if (state.mode === 'build' && state.selected && isPart(state.selected)) {
+  else if (state.mode === 'build' && state.tool === 'points' && state.selected && !mod && 'mtse123p'.includes(e.key.toLowerCase())) {
+    const key = e.key.toLowerCase();
+    if (key === 'e') extrudeSel();
+    else if ('123'.includes(key)) state.emode = ['dot', 'edge', 'face'][+key - 1];
+    else if (key !== 'p') state.pgizmo = { m: 'move', t: 'turn', s: 'size' }[key];
+    refresh();
+  } else if (state.mode === 'build' && state.selected && isPart(state.selected)) {
     const k = { m: 'move', t: 'turn', s: 'size', p: 'points' }[e.key.toLowerCase()];
     if (k && !mod) {
       state.tool = k;
@@ -987,5 +1184,5 @@ function frame() {
   refresh();
   frame();
   // handy for testing / poking around in the console
-  window.__bb = { state, model, scene, camera, orbit, transform, select, byId, registry, docJSON, applyPose, setMode, commit, undo, redo };
+  window.__bb = { pts: () => pts, psel: () => psel, pivot, selectEls, loadDocJSON: (j) => loadDoc(JSON.parse(j)), state, model, scene, camera, orbit, transform, select, byId, registry, docJSON, applyPose, setMode, commit, undo, redo };
 })();

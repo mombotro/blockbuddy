@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { attachFaces, ensureFaces, sphereFaces } from './editmesh.js';
 
 // [id, label, emoji]
 export const SHAPES = [
@@ -46,6 +47,7 @@ function unit(type) {
   if (g.index) g = g.toNonIndexed();
   g.deleteAttribute('normal');
   g.deleteAttribute('uv');
+  attachFaces(g, type === 'ball' ? sphereFaces(10, 7) : null);
   return g;
 }
 
@@ -120,6 +122,9 @@ export function mirrorInto(dst, src, texScale) {
     const j = perm(i);
     dp.setXYZ(i, -sp.getX(j), sp.getY(j), sp.getZ(j));
   }
+  ensureFaces(src);
+  if (!dst.attributes.face || dst.attributes.face.count !== sp.count) dst.setAttribute('face', src.attributes.face.clone());
+  else dst.attributes.face.array.set(src.attributes.face.array);
   refreshGeometry(dst, texScale);
 }
 
@@ -153,24 +158,52 @@ function clipPoly(tri, d, side, axis, c) {
 }
 
 export function sliceGeometry(g, axis, c, texScale) {
+  ensureFaces(g);
   const p = g.attributes.position;
-  const out = [];
-  for (let t = 0; t < p.count; t += 3) {
-    const tri = [0, 1, 2].map((k) => [p.getX(t + k), p.getY(t + k), p.getZ(t + k)]);
+  const fa = g.attributes.face;
+  const tn = p.count / 3;
+  const tris = [];
+  // pass 1: which side is each triangle on, and which faces end up on both sides
+  const hasNeg = new Set();
+  const hasPos = new Set();
+  let maxId = -1;
+  for (let t = 0; t < tn; t++) {
+    const tri = [0, 1, 2].map((k) => [p.getX(t * 3 + k), p.getY(t * 3 + k), p.getZ(t * 3 + k)]);
     const d = tri.map((v) => v[axis] - c);
+    const id = fa.getX(t * 3);
+    maxId = Math.max(maxId, id);
+    tris.push({ tri, d, id });
+    if (d.some((x) => x < -EPS)) hasNeg.add(id);
+    if (d.some((x) => x > EPS)) hasPos.add(id);
+  }
+  // a face cut in two becomes two faces: the far half gets a new id
+  const farId = new Map();
+  for (const id of hasNeg) if (hasPos.has(id)) farId.set(id, ++maxId);
+  const out = [];
+  const outFace = [];
+  for (const { tri, d, id } of tris) {
     if (d.every((x) => x >= -EPS) || d.every((x) => x <= EPS)) {
+      const far = d.some((x) => x > EPS);
       out.push(...tri);
+      outFace.push(far && farId.has(id) ? farId.get(id) : id);
       continue;
     }
     for (const side of [-1, 1]) {
       const poly = clipPoly(tri, d, side, axis, c);
-      for (let k = 1; k < poly.length - 1; k++) out.push(poly[0], poly[k], poly[k + 1]);
+      const pid = side === 1 && farId.has(id) ? farId.get(id) : id;
+      for (let k = 1; k < poly.length - 1; k++) {
+        out.push(poly[0], poly[k], poly[k + 1]);
+        outFace.push(pid);
+      }
     }
   }
   const arr = new Float32Array(out.length * 3);
   out.forEach((v, i) => arr.set(v, i * 3));
   const ng = new THREE.BufferGeometry();
   ng.setAttribute('position', new THREE.BufferAttribute(arr, 3));
+  const fArr = new Float32Array(out.length);
+  outFace.forEach((id, t) => fArr.fill(id, t * 3, t * 3 + 3));
+  ng.setAttribute('face', new THREE.BufferAttribute(fArr, 1));
   refreshGeometry(ng, texScale);
   return ng;
 }

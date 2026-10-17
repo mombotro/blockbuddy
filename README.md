@@ -7,7 +7,7 @@ Simple 3D block modeler for kids. Builds models for three.js games.
 
 ## What it does
 - **Shapes:** box, ball, can, cone, pyramid, ramp. Move / Turn / Size gizmos (snap to grid).
-- **Points:** drag a shape's corner dots to reshape it. Swap a part's shape type and keep its size.
+- **Points:** pick **Dots**, **Edges** or **Faces** and drag them with Move / Turn / Size (Shift-click picks more; click right on a face in Faces mode). **Extrude** pushes picked faces out with side walls, or pulls a flap out of one edge. Keys: `1` `2` `3` modes, `M` `T` `S` gizmo, `E` extrude. Swap a part's shape type and keep its size.
 - **Mirror:** "Make a mirror twin" copies a part across the pink line (x = 0). Twins stay linked: change one, the other follows (move, size, points, color, pattern, add-ons).
 - **More dots:** "split the Height / Width / Depth" adds a new ring of dots across a shape (a loop cut). It cuts in the widest gap, so repeat to add more. Twins follow.
 - **Stuck to:** any part can be stuck to another part or a bone ("Stick to something…", then click the target) or unstuck. It stays put and follows its new parent. A twin moves to the mirror of the new parent. Turn on "New shapes stick onto the one I picked" in Helpers to attach new shapes automatically.
@@ -38,4 +38,4 @@ Animate by rotating bones by name, or build an AnimationClip with tracks like `L
 - `src/main.js` scene, gizmos, picking, UI, export
 
 ## Not built yet (ideas)
-Animation timeline, true skinned meshes, free-form skeleton building, mirror for parts on the center line.
+Extruding dots, deleting faces, inset, animation timeline, true skinned meshes, free-form skeleton building, mirror for parts on the center line.

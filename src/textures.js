@@ -213,7 +213,7 @@ function imageTexture(url) {
 }
 
 export function makeMaterial({ color = '#ffffff', pattern = 'none', image = null }) {
-  const m = new THREE.MeshStandardMaterial({ color: new THREE.Color(color), roughness: 0.9, metalness: 0 });
+  const m = new THREE.MeshStandardMaterial({ color: new THREE.Color(color), roughness: 0.9, metalness: 0, side: THREE.DoubleSide });
   if (image) m.map = imageTexture(image);
   else if (pattern && pattern !== 'none') m.map = patternTexture(pattern);
   return m;
