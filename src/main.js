@@ -454,6 +454,56 @@ function onDragEnd() {
 const ray = new THREE.Raycaster();
 const ptr = new THREE.Vector2();
 let down = null;
+
+// Shift + drag in Points mode draws a box and picks every dot / edge / face inside it.
+// Capture phase, so the camera and gizmo never see this drag.
+let marquee = null;
+const marqueeEl = document.createElement('div');
+marqueeEl.id = 'marquee';
+marqueeEl.hidden = true;
+$('#stage').appendChild(marqueeEl);
+canvas.addEventListener(
+  'pointerdown',
+  (e) => {
+    if (!e.shiftKey || e.button !== 0 || state.tool !== 'points' || state.mode !== 'build' || !pts || transform.axis) return;
+    e.stopImmediatePropagation();
+    down = null;
+    marquee = { x0: e.clientX, y0: e.clientY, x1: e.clientX, y1: e.clientY };
+    canvas.setPointerCapture(e.pointerId);
+  },
+  true,
+);
+canvas.addEventListener('pointermove', (e) => {
+  if (!marquee) return;
+  marquee.x1 = e.clientX;
+  marquee.y1 = e.clientY;
+  const r = $('#stage').getBoundingClientRect();
+  const m = marqueeEl.style;
+  m.left = Math.min(marquee.x0, marquee.x1) - r.left + 'px';
+  m.top = Math.min(marquee.y0, marquee.y1) - r.top + 'px';
+  m.width = Math.abs(marquee.x1 - marquee.x0) + 'px';
+  m.height = Math.abs(marquee.y1 - marquee.y0) + 'px';
+  marqueeEl.hidden = Math.hypot(marquee.x1 - marquee.x0, marquee.y1 - marquee.y0) < 5;
+});
+canvas.addEventListener('pointerup', (e) => {
+  if (!marquee) return;
+  const m = marquee;
+  marquee = null;
+  marqueeEl.hidden = true;
+  if (Math.hypot(m.x1 - m.x0, m.y1 - m.y0) < 5) return pick(e); // just a shift-click
+  const r = canvas.getBoundingClientRect();
+  const [xa, xb] = [Math.min(m.x0, m.x1), Math.max(m.x0, m.x1)];
+  const [ya, yb] = [Math.min(m.y0, m.y1), Math.max(m.y0, m.y1)];
+  const hit = [];
+  const v = new THREE.Vector3();
+  pts.handles.forEach((h, i) => {
+    h.getWorldPosition(v).project(camera);
+    const sx = r.left + ((v.x + 1) / 2) * r.width;
+    const sy = r.top + ((1 - v.y) / 2) * r.height;
+    if (v.z < 1 && sx >= xa && sx <= xb && sy >= ya && sy <= yb && !psel.includes(i)) hit.push(i);
+  });
+  selectEls(hit, true);
+});
 canvas.addEventListener('pointerdown', (e) => {
   down = { x: e.clientX, y: e.clientY, onGizmo: !!transform.axis, button: e.button };
 });
@@ -924,7 +974,7 @@ function renderToolbar() {
       `<i class="sep"></i>` +
       gz('move', '↔️', 'Move') + gz('turn', '🔄', 'Turn') + gz('size', '⤡', 'Size') +
       `<i class="sep"></i><button class="tool" data-act="extrude" ${can ? '' : 'disabled'}><span>⬆️</span>Extrude</button>` +
-      `<span class="label full">${hint} · Shift = pick more</span>`;
+      `<span class="label full">${hint} · Shift+click or Shift+drag = pick more</span>`;
   } else {
     const t = (id, icon, label) =>
       `<button class="tool ${state.tool === id ? 'on' : ''}" data-act="tool:${id}"><span>${icon}</span>${label}</button>`;
