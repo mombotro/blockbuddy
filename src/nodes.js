@@ -118,6 +118,7 @@ export function makePart(type, parent, wp, size, opts = {}) {
     image: o.image,
     texScale: o.texScale,
     twin: null,
+    faceColors: {},
   };
   mesh.rotation.set(...o.rot.map((d) => (d * Math.PI) / 180));
   parent.add(mesh);
@@ -167,6 +168,7 @@ export function mirrorSubtree(src, newParent) {
       image: u.image,
       texScale: u.texScale,
       twin: u.id,
+      faceColors: { ...(u.faceColors || {}) },
     };
   }
   c.name = swapSide(src.name);
@@ -180,12 +182,12 @@ export function mirrorSubtree(src, newParent) {
 }
 
 // Copy an edit from `n` onto its twin. full=true also rebuilds the shape.
-export function syncTwin(n, full = false) {
+export function syncTwin(n, full = false, carry = false) {
   const t = twinOf(n);
   if (!t) return;
   if (isJoint(n)) {
     // twin joint moves, but whatever hangs off it stays where it is
-    const held = kids(t).map((k) => [k, worldOf(k)]);
+    const held = carry ? [] : kids(t).map((k) => [k, worldOf(k)]);
     setWorld(t, mirroredWorld(n));
     held.forEach(([k, W]) => setWorld(k, W));
     updateBoneLine(t);
@@ -251,6 +253,7 @@ export function serializeNode(n) {
     d.texScale = u.texScale;
     d.verts = r4(n.geometry.attributes.position.array);
     d.faces = facesToTris(n.geometry);
+    if (u.faceColors && Object.keys(u.faceColors).length) d.fcol = u.faceColors;
   }
   return d;
 }
@@ -279,6 +282,7 @@ export function deserialize(d, parent, opt = {}) {
       image: d.image || null,
       texScale: d.texScale,
       twin: null,
+      faceColors: { ...(d.fcol || {}) },
     };
   }
   if (!opt.fresh) n.userData.twin = d.twin || null;

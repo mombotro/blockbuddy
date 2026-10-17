@@ -50,6 +50,11 @@ import {
   faceLoop,
   deleteFaces,
   insetFaces,
+  mergeDots,
+  extrudeDots,
+  fillDots,
+  bevelEdges,
+  exportGeometry,
 } from './editmesh.js';
 
 const $ = (s) => document.querySelector(s);
@@ -114,6 +119,10 @@ const state = {
   keepPose: false,
   poseIdx: 0,
   stickNew: false, // new shapes stick onto the picked part
+  advanced: false, // the Blender-style extras
+  bevelW: 0.06,
+  boneCarry: false, // moving a bone drags its shapes along
+  brushColor: '#ef4444', // face paint color
   sticking: null, // id of the part waiting to be stuck onto something
 };
 
@@ -390,6 +399,10 @@ function applyTool() {
     attachPivot();
     return;
   }
+  if (state.tool === 'paint') {
+    transform.detach();
+    return;
+  }
   transform.attach(n);
   transform.setMode(state.tool === 'turn' ? 'rotate' : state.tool === 'size' ? 'scale' : 'translate');
   transform.setSpace(state.tool === 'move' ? 'world' : 'local');
@@ -408,7 +421,7 @@ function onDragStart() {
 }
 function beginDrag(o) {
   drag = { obj: o };
-  if (o && isJoint(o) && state.mode === 'build') drag.held = kids(o).map((k) => [k, worldOf(k)]);
+  if (o && isJoint(o) && state.mode === 'build' && !state.boneCarry) drag.held = kids(o).map((k) => [k, worldOf(k)]);
   if (o === pivot && pts) {
     pts.part.updateWorldMatrix(true, false);
     drag.pts = { C: pivot.position.clone(), W0: selGroups().map((gi) => [gi, pts.part.localToWorld(posOf(gi))]) };
@@ -421,7 +434,7 @@ function onObjectChange(o = transform.object) {
   if (isJoint(o)) {
     if (drag && drag.held) drag.held.forEach(([k, W]) => setWorld(k, W));
     updateBoneLine(o);
-    syncTwin(o);
+    syncTwin(o, false, state.boneCarry);
   } else syncTwin(o);
 }
 function onPivotChange() {
@@ -500,7 +513,7 @@ const snapV = (v) => (state.snap ? Math.round(v / 0.05) * 0.05 : v);
 const KIND_NAME = { move: 'Move', turn: 'Rotate', size: 'Scale' };
 
 function startModal(kind) {
-  if (modal || state.mode !== 'build' || state.sticking) return;
+  if (!state.advanced || modal || state.mode !== 'build' || state.sticking) return;
   const n = state.selected;
   let tgt = null;
   if (state.tool === 'points' && n && isPart(n)) tgt = pts && psel.length ? 'elements' : null;
@@ -709,7 +722,7 @@ function pick(e) {
     const ms = jointsList().map((j) => j.userData.marker).filter((m) => m && m.visible);
     const mh = ray.intersectObjects(ms, false)[0];
     if (mh) target = mh.object.userData.markerFor;
-    else {
+    else if (!(part && isJoint(part))) {
       const parts = [];
       model.traverse((o) => isPart(o) && parts.push(o));
       const ph = ray.intersectObjects(parts, false)[0];
@@ -721,9 +734,20 @@ function pick(e) {
     else toast('Nothing picked. Nothing changed.');
     return refresh();
   }
+  if (state.tool === 'paint' && state.mode === 'build' && state.advanced) {
+    const all = [];
+    model.traverse((o) => isPart(o) && all.push(o));
+    const ph = ray.intersectObjects(all, false)[0];
+    if (!ph) return select(null);
+    ensureFaces(ph.object.geometry);
+    const id = ph.object.geometry.attributes.face.getX(ph.faceIndex * 3);
+    state.selected = ph.object;
+    paintFaces(ph.object, [id], state.brushColor);
+    return commit();
+  }
   if (state.tool === 'points' && state.mode === 'build' && pts) {
     const hit = ray.intersectObjects(pts.handles, false)[0];
-    if (hit && e.altKey) return loopSelect(hit.object.userData.pel, e.shiftKey);
+    if (hit && e.altKey && state.advanced) return loopSelect(hit.object.userData.pel, e.shiftKey);
     if (hit) return selectEls([hit.object.userData.pel], e.shiftKey);
     if (state.emode === 'face') {
       // click right on a face of the shape
@@ -731,7 +755,7 @@ function pick(e) {
       if (sh) {
         const id = pts.part.geometry.attributes.face.getX(sh.faceIndex * 3);
         const idx = pts.els.findIndex((f) => f.id === id);
-        if (idx >= 0) return e.altKey ? loopSelect(idx, e.shiftKey) : selectEls([idx], e.shiftKey);
+        if (idx >= 0) return e.altKey && state.advanced ? loopSelect(idx, e.shiftKey) : selectEls([idx], e.shiftKey);
       }
     }
   }
@@ -803,7 +827,7 @@ function stickTo(part, target) {
 }
 function startStick() {
   const n = state.selected;
-  if (!n || !isPart(n)) return;
+  if (!n || !(isPart(n) || (isJoint(n) && state.advanced))) return;
   state.sticking = n.userData.id;
   applyBoneVisibility();
   refresh();
@@ -863,13 +887,15 @@ function ringSelect(axis) {
   selectEls(idx.filter((i) => !psel.includes(i)), true); // add, never un-pick
   toast(`${idx.length} on that ring`);
 }
-function setMesh(part, res) {
+function setMesh(part, res, inheritFrom = null) {
+  const oldIds = new Set(part.geometry.attributes.face.array);
   const ng = new THREE.BufferGeometry();
   ng.setAttribute('position', new THREE.BufferAttribute(res.position, 3));
   ng.setAttribute('face', new THREE.BufferAttribute(res.face, 1));
   refreshGeometry(ng, part.userData.texScale);
   part.geometry.dispose();
   part.geometry = ng;
+  inheritFaceColors(part, oldIds, inheritFrom);
   syncTwin(part, true);
   commit(); // rebuilds the handles
 }
@@ -899,9 +925,180 @@ function insetSel() {
   const ids = new Set(psel.map((i) => pts.els[i].id));
   const res = insetFaces(pts.part.geometry, ids, 0.3);
   if (!res) return;
-  setMesh(pts.part, res);
+  setMesh(pts.part, res, [...ids][0]);
   reselectFaces(ids);
   toast('Inset! Now Extrude it for a window or a button. ⬆️');
+}
+
+// Bevel (chamfer) the picked edges. Picked faces bevel their rim, picked dots bevel the edges between them.
+function edgesFromSelection() {
+  const topo = pts.topo;
+  const all = topo.edges.map((_, i) => i);
+  if (state.emode === 'edge') return psel.slice();
+  if (state.emode === 'face') {
+    const ids = new Set(psel.map((i) => pts.els[i].id));
+    return all.filter((i) => topo.edges[i].faces.length === 2 && topo.edges[i].faces.filter((f) => ids.has(f)).length === 1);
+  }
+  const gs = new Set(selGroups());
+  return all.filter((i) => topo.edges[i].gs.every((g) => gs.has(g)));
+}
+function bevelSel() {
+  if (!pts || !psel.length) return toast('Pick edges (or a face) to bevel first.');
+  const res = bevelEdges(pts.part.geometry, pts.topo, edgesFromSelection(), state.bevelW);
+  if (res.error) return toast(res.error);
+  setMesh(pts.part, res);
+  toast('Beveled! Bevel again for a rounder corner. ◢');
+}
+function mergeSel() {
+  const gs = pts && psel.length ? selGroups() : [];
+  if (gs.length < 2) return toast('Pick two or more dots to merge.');
+  const res = mergeDots(pts.part.geometry, pts.topo, gs);
+  if (!res) return toast('That would squash the whole shape.');
+  setMesh(pts.part, res);
+  toast(`Merged ${gs.length} dots into one. ⚫`);
+}
+function fillSel() {
+  const gs = pts && psel.length ? selGroups() : [];
+  if (gs.length < 3) return toast('Pick three or more dots to fill with a face.');
+  const res = fillDots(pts.part.geometry, pts.topo, gs);
+  if (!res) return toast("Those dots are in a straight line, so they can't make a face.");
+  setMesh(pts.part, res);
+  toast('Face made! ▣');
+}
+
+// ---------------------------------------------------------------- face colors (advanced)
+// Each face id can have its own color. The editor turns that into vertex colors, which the
+// game file keeps (COLOR_0), so the colors show up in three.js too.
+const fcRGB = new Map();
+function ensureFaceColors(o) {
+  const g = o.geometry;
+  const sig = `${g.uuid}:${g.attributes.position.count}:${o.material.uuid}:${o.userData.fcv || 0}`;
+  if (o.userData._fcSig === sig) return;
+  o.userData._fcSig = sig;
+  const fc = o.userData.faceColors || {};
+  if (!Object.keys(fc).length) {
+    if (g.attributes.color) g.deleteAttribute('color');
+    o.material.vertexColors = false;
+    o.material.color.set(o.userData.color || '#ffffff');
+    o.material.needsUpdate = true;
+    return;
+  }
+  ensureFaces(g);
+  const F = g.attributes.face.array;
+  // unpainted faces carry the part's own color, so a painted face replaces it instead of tinting it
+  const base = new THREE.Color(o.userData.color || '#ffffff');
+  const col = new Float32Array(g.attributes.position.count * 3);
+  for (let i = 0; i < col.length; i += 3) col.set([base.r, base.g, base.b], i);
+  o.material.color.set('#ffffff');
+  for (let i = 0; i < F.length; i++) {
+    const hex = fc[F[i]];
+    if (!hex) continue;
+    if (!fcRGB.has(hex)) {
+      const c = new THREE.Color(hex);
+      fcRGB.set(hex, [c.r, c.g, c.b]);
+    }
+    col.set(fcRGB.get(hex), i * 3);
+  }
+  g.setAttribute('color', new THREE.BufferAttribute(col, 3));
+  o.material.vertexColors = true;
+  o.material.needsUpdate = true;
+}
+// call after changing a part's faceColors: re-applies it, and copies to the mirror twin
+function touchFaceColors(part) {
+  part.userData.fcv = (part.userData.fcv || 0) + 1;
+  const t = twinOf(part);
+  if (t) {
+    t.userData.faceColors = { ...part.userData.faceColors };
+    t.userData.fcv = (t.userData.fcv || 0) + 1;
+  }
+}
+// after the shape changed: forget colors of faces that are gone, and let new faces copy `from`
+function inheritFaceColors(part, oldIds, from, extra = null) {
+  const fc = { ...(part.userData.faceColors || {}) };
+  if (!Object.keys(fc).length) return;
+  const now = new Set(part.geometry.attributes.face.array);
+  for (const id of Object.keys(fc)) if (!now.has(+id)) delete fc[id];
+  if (extra) for (const [o, nw] of extra) if (fc[o] && now.has(nw)) fc[nw] = fc[o];
+  if (from !== null && from !== undefined && fc[from]) for (const id of now) if (!oldIds.has(id)) fc[id] = fc[from];
+  part.userData.faceColors = fc;
+  touchFaceColors(part);
+}
+function paintFaces(part, ids, hex) {
+  const fc = { ...(part.userData.faceColors || {}) };
+  ids.forEach((id) => (hex ? (fc[id] = hex) : delete fc[id]));
+  part.userData.faceColors = fc;
+  touchFaceColors(part);
+}
+function faceColorBtn(hex, live) {
+  state.brushColor = hex;
+  if (state.tool === 'paint') return refresh();
+  if (!pts || !psel.length) return toast('Pick faces first (▣ Faces mode), or use the 🖌️ Paint tool. 🎨');
+  paintFaces(pts.part, selFaceIds(), hex);
+  if (!live) commit();
+}
+function clearFaceColors(all) {
+  const part = state.selected;
+  if (!part || !isPart(part)) return;
+  if (all) paintFaces(part, Object.keys(part.userData.faceColors || {}), null);
+  else if (pts && psel.length) paintFaces(part, selFaceIds(), null);
+  else return toast('Pick faces first to clear their color.');
+  commit();
+}
+
+// ---------------------------------------------------------------- bones (advanced)
+function uniqueBoneName(base, except = null) {
+  const used = new Set(jointsList().filter((j) => j !== except).map((j) => j.name));
+  if (!used.has(base)) return base;
+  let i = 2;
+  while (used.has(`${base}_${i}`)) i++;
+  return `${base}_${i}`;
+}
+// Hang a new bone off the picked bone (or start a new root bone), like Blender's E in bone edit.
+function addBone() {
+  const sel = state.selected;
+  const parent = sel && isJoint(sel) ? sel : model;
+  const at = new THREE.Vector3(0, 0.5, 0);
+  if (parent !== model) {
+    at.copy(worldPos(parent));
+    const dir = isJoint(parent.parent) ? at.clone().sub(worldPos(parent.parent)) : new THREE.Vector3(0, 1, 0);
+    at.add(dir.lengthSq() > 1e-6 ? dir.normalize().multiplyScalar(Math.min(0.3, Math.max(0.1, dir.length()))) : new THREE.Vector3(0, 0.2, 0));
+  }
+  const j = makeJoint(uniqueBoneName('Bone'), parent, at.toArray());
+  state.bonesUser = true;
+  applyBoneVisibility();
+  state.tool = 'move';
+  select(j);
+  commit();
+  toast('New bone! Drag the arrows (or press G) to put it where it bends. 🦴');
+}
+// Remove a bone. Shapes and bones hanging off it move up to its parent and stay put.
+function deleteBone(j) {
+  if (!j || !isJoint(j)) return;
+  const par = j.parent;
+  const held = kids(j).map((k) => [k, worldOf(k)]);
+  held.forEach(([k]) => par.add(k));
+  held.forEach(([k, W]) => setWorld(k, W));
+  removeNode(j);
+  state.selected = null;
+  toast('Bone deleted. Its shapes stayed.');
+  commit();
+}
+function setAdvanced(on) {
+  state.advanced = on;
+  document.body.classList.toggle('adv', on);
+  try {
+    localStorage.setItem('blockbuddy-advanced', on ? '1' : '0');
+  } catch (e) {
+    /* fine */
+  }
+  if (modal) endModal(false);
+  toast(on ? 'Advanced tools on. Press ? for the key list. 🛠️' : 'Advanced tools off.');
+  refresh();
+}
+function resetPose() {
+  restoreRest();
+  state.poseIdx = 0;
+  renderLeft();
 }
 
 // Extrude: push picked faces out (with side walls), or pull a flap out of one edge.
@@ -920,19 +1117,26 @@ function extrudeSel() {
     if (psel.length !== 1) return toast('Extrude one edge at a time.');
     const [a, b] = pts.els[psel[0]].gs;
     res = extrudeEdge(g, posOf(a), posOf(b), dist);
+  } else if (state.advanced) {
+    res = extrudeDots(g, pts.topo, selGroups(), dist);
   } else return toast('Extrude works on faces ▣ and edges ➖. Switch the mode below.');
   if (!res) return;
   const ng = new THREE.BufferGeometry();
   ng.setAttribute('position', new THREE.BufferAttribute(res.position, 3));
   ng.setAttribute('face', new THREE.BufferAttribute(res.face, 1));
   refreshGeometry(ng, part.userData.texScale);
+  const oldIds = new Set(g.attributes.face.array);
   g.dispose();
   part.geometry = ng;
+  inheritFaceColors(part, oldIds, faceIds ? [...faceIds][0] : state.emode === 'edge' ? pts.els[psel[0]].faces[0] : null);
   syncTwin(part, true);
   commit(); // rebuilds the handles for the new shape
   if (pts) {
     if (faceIds) selectEls(pts.els.map((el, i) => (faceIds.has(el.id) ? i : -1)).filter((i) => i >= 0), false);
-    else {
+    else if (state.emode === 'dot') {
+      const ks = new Set(res.keys);
+      selectEls(pts.els.map((el, i) => (ks.has(keyOf(posOf(el.gs[0]))) ? i : -1)).filter((i) => i >= 0), false);
+    } else {
       const i = pts.els.findIndex((el) => {
         const ks = el.gs.map((gi) => keyOf(posOf(gi)));
         return res.keys.every((k) => ks.includes(k));
@@ -947,8 +1151,10 @@ function sliceSelected(axis) {
   const n = state.selected;
   if (!n || !isPart(n)) return;
   const g = sliceGeometry(n.geometry, axis, gapMiddle(n.geometry, axis), n.userData.texScale);
+  const oldIds = new Set(n.geometry.attributes.face.array);
   n.geometry.dispose();
   n.geometry = g;
+  inheritFaceColors(n, oldIds, null, g.userData.farIds);
   syncTwin(n, true);
   state.tool = 'points';
   toast('New ring of dots! Drag them to reshape. ✏️');
@@ -1006,8 +1212,8 @@ function del() {
 }
 function makeMirror() {
   const n = state.selected;
-  if (!n || !isPart(n) || n.userData.twin) return;
-  if (Math.abs(worldPos(n).x) < 0.03) return toast('This part is in the middle. Move it to one side first, then mirror it!');
+  if (!n || !isNode(n) || n.userData.twin) return;
+  if (Math.abs(worldPos(n).x) < 0.03) return toast('This is in the middle. Move it to one side first, then mirror it!');
   const pt = isNode(n.parent) ? twinOf(n.parent) : null;
   const m = mirrorSubtree(n, pt || n.parent);
   toast('Mirror twin made! Change one, the other follows. 🪞');
@@ -1028,8 +1234,8 @@ function swapShapeTo(type) {
 function setMode(m) {
   if (m === state.mode) return;
   if (m === 'pose') {
-    if (!state.rig) {
-      toast('Pose needs a buddy with bones! Pick a Person, Dog or Bird first. 🐶');
+    if (!jointsList().length) {
+      toast('Pose needs bones! Pick a Person, Dog, Cat, Horse or Bird, or add your own bones in Advanced mode. 🦴');
       return;
     }
     jointsList().forEach((j) => (j.userData.rest = { p: j.position.clone(), q: j.quaternion.clone() }));
@@ -1120,6 +1326,13 @@ async function exportGLB() {
       hidden.push(o);
     }
   });
+  const swapped = [];
+  model.traverse((o) => {
+    if (!isPart(o)) return;
+    ensureFaceColors(o);
+    swapped.push([o, o.geometry]);
+  });
+  swapped.forEach(([o, g]) => (o.geometry = exportGeometry(g))); // real triangles only, no editor data
   const oldName = model.name;
   model.name = safeName();
   const savedNames = nameForExport(model);
@@ -1132,6 +1345,10 @@ async function exportGLB() {
     toast('Export had a problem: ' + err.message);
   } finally {
     restoreNames(savedNames);
+    swapped.forEach(([o, g]) => {
+      o.geometry.dispose();
+      o.geometry = g;
+    });
     model.name = oldName;
     hidden.forEach((o) => (o.visible = true));
     if (posed) saved.forEach(([j, p, q]) => (j.position.copy(p), j.quaternion.copy(q)));
@@ -1195,6 +1412,7 @@ function renderTop() {
   $('#tab-pose').classList.toggle('on', state.mode === 'pose');
   $('#undoBtn').disabled = hi <= 0;
   $('#redoBtn').disabled = hi >= hist.length - 1;
+  $('#advBtn').classList.toggle('on', state.advanced);
   const inp = $('#projName');
   if (document.activeElement !== inp) inp.value = state.name;
 }
@@ -1205,6 +1423,7 @@ function renderLeft() {
     const poses = posesFor(state.rig);
     el.innerHTML = `
       <h3>Pick a pose</h3>
+      ${poses.length ? '' : '<p class="tip">No ready-made poses for your own bones. Click a bone and drag the rings to bend it.</p>'}
       <div class="grid2">${poses
         .map(
           (p, i) =>
@@ -1212,6 +1431,7 @@ function renderLeft() {
         )
         .join('')}</div>
       <p class="tip">Click a body part, then drag the colored rings to bend it.</p>
+      <button class="wide soft" data-act="resetpose">↺ Back to the starting pose</button>
       <label class="check"><input type="checkbox" id="keepPose" ${state.keepPose ? 'checked' : ''}> Save the game file in this pose</label>
       <p class="tip small">Off = game file keeps the starting pose, so your game can animate it.</p>`;
     return;
@@ -1226,7 +1446,13 @@ function renderLeft() {
     <h3>Helpers</h3>
     <label class="check"><input type="checkbox" id="stickNewChk" ${state.stickNew ? 'checked' : ''}> New shapes stick onto the one I picked</label>
     <label class="check"><input type="checkbox" id="snapChk" ${state.snap ? 'checked' : ''}> Snap to grid</label>
-    <label class="check"><input type="checkbox" id="bonesChk" ${state.bonesUser ? 'checked' : ''}> Show bones (orange dots)</label>`;
+    <label class="check"><input type="checkbox" id="bonesChk" ${state.bonesUser ? 'checked' : ''}> Show bones (orange dots)</label>
+    ${
+      state.advanced
+        ? `<h3>Bones 🦴</h3><button class="wide" data-act="addbone">➕ Add a bone</button>
+    <p class="tip small">Pick a bone first to hang the new one off it. Click an orange dot to pick a bone.</p>`
+        : ''
+    }`;
 }
 
 function renderToolbar() {
@@ -1237,7 +1463,7 @@ function renderToolbar() {
     html = `<span class="label full" style="font-size:15px">${esc(modal.label)} · X Y Z = axis · type a number · click or Enter = OK · Esc = cancel</span>`;
   } else if (state.sticking) {
     const p = byId(state.sticking);
-    html = `<span class="label">📎 Click what to stick “${esc(p ? p.name : '')}” onto (a shape or an orange bone)</span><button data-act="cancelstick">Cancel</button>`;
+    html = `<span class="label">📎 Click ${p && isJoint(p) ? 'the bone to hang' : 'what to stick'} “${esc(p ? p.name : '')}” ${p && isJoint(p) ? 'under (an orange dot)' : 'onto (a shape or an orange bone)'}</span><button data-act="cancelstick">Cancel</button>`;
   } else if (state.mode === 'pose') {
     html = n
       ? `<span class="label">🦴 ${esc(n.name)} — drag the rings to bend</span>`
@@ -1251,7 +1477,7 @@ function renderToolbar() {
       `<button class="tool ${state.emode === id ? 'on' : ''}" data-act="emode:${id}"><span>${icon}</span>${l}</button>`;
     const gz = (id, icon, l) =>
       `<button class="tool ${state.pgizmo === id ? 'on' : ''}" data-act="pgz:${id}"><span>${icon}</span>${l}</button>`;
-    const can = pts && psel.length && state.emode !== 'dot';
+    const can = pts && psel.length && (state.emode !== 'dot' || state.advanced);
     const hint = psel.length
       ? `${psel.length} picked`
       : state.emode === 'face' ? 'Click a face' : state.emode === 'edge' ? 'Click a diamond' : 'Click a dot';
@@ -1269,7 +1495,9 @@ function renderToolbar() {
       t('move', '↔️', 'Move') +
       t('turn', '🔄', 'Turn') +
       t('size', '⤡', 'Size') +
-      t('points', '✏️', 'Points');
+      t('points', '✏️', 'Points') +
+      (state.advanced ? t('paint', '🖌️', 'Paint') : '') +
+      (state.tool === 'paint' ? `<span class="label">Click a face to paint it <i class="chip" style="background:${state.brushColor}"></i></span>` : '');
   }
   el.innerHTML = html;
   el.classList.toggle('hidden', false);
@@ -1286,7 +1514,26 @@ function renderRight() {
   }
   if (isJoint(n)) {
     const t = twinOf(n);
-    el.innerHTML = `<h3>🦴 ${esc(n.name)}</h3>
+    const par = isNode(n.parent) ? n.parent : null;
+    el.innerHTML = state.advanced
+      ? `<h3>🦴 Bone</h3>
+      <input id="nameIn" value="${esc(n.name)}" maxlength="40">
+      <p class="tip">Shapes bend around a bone when you pose. Put it where the bend should be.</p>
+      <p class="tip">Under: <b>${par ? esc(par.name) : 'nothing (a root bone)'}</b></p>
+      <div class="sec"><b>Bone tools 🦴</b>
+        <button class="wide" data-act="addbone">➕ Add a bone from here</button>
+        <button class="wide" data-act="stickto">📎 Move under another bone…</button>
+        ${par ? `<button class="wide soft" data-act="unstick">✂️ Make it a root bone</button>` : ''}
+        ${
+          t
+            ? `<p class="tip">🔗 Mirror twin: <b>${esc(t.name)}</b></p><button class="wide soft" data-act="unlink">Unlink twins</button>`
+            : `<button class="wide" data-act="mirror">🪞 Make a mirror twin</button><p class="tip small">Copies this bone and everything under it to the other side.</p>`
+        }
+        <label class="check"><input type="checkbox" id="carryChk" ${state.boneCarry ? 'checked' : ''}> Shapes move with the bone</label>
+        <button class="wide danger" data-act="delbone">🗑️ Delete bone (shapes stay)</button>
+      </div>
+      <p class="tip small">To put a shape on this bone, press a shape under “Add a shape”. Keys: E add bone · G move · X delete.</p>`
+      : `<h3>🦴 ${esc(n.name)}</h3>
       <p class="tip">This is a <b>bone joint</b>. Parts bend around it when you pose.</p>
       <p class="tip">Move it to where the bend should be. The shapes stay put.</p>
       ${t ? `<p class="tip">🔗 Linked with <b>${esc(t.name)}</b></p>` : ''}
@@ -1301,17 +1548,31 @@ function renderRight() {
   const t = twinOf(n);
   const par = isNode(n.parent) ? n.parent : null;
   const mini = 'class="mini" style="font-size:13px"';
+  const fcol = `<div class="sec"><b>Face color 🎨</b>
+      <div class="swatches">${PALETTE.map((c) => `<button class="sw ${state.brushColor.toLowerCase() === c ? 'on' : ''}" style="background:${c}" data-act="fcol:${c}" title="${c}"></button>`).join('')}</div>
+      <label class="check"><span>Any color</span><input type="color" id="fcolCustom" value="${state.brushColor}"></label>
+      <p class="tip small">${state.tool === 'paint' ? 'Click faces on the shape to paint them with this color.' : 'Pick faces (▣ Faces mode), then press a color to paint them.'}</p>
+      <div class="row" style="margin-top:6px"><button ${mini} data-act="fclear">Clear picked</button><button ${mini} data-act="fclearall">Clear all</button></div></div>`;
   const editBox =
-    state.tool === 'points'
-      ? `<div class="sec"><b>Pick ✋</b>
+    state.tool === 'paint' && state.advanced
+      ? fcol
+      : state.tool !== 'points'
+      ? ''
+      : state.advanced
+        ? `<div class="sec"><b>Pick ✋</b>
       <div class="grid3"><button ${mini} data-act="selall" title="A">All</button><button ${mini} data-act="selnone" title="Alt+A">None</button><button ${mini} data-act="selinv" title="Ctrl+I">Flip</button></div>
       <p class="tip small">Pick everything on the same level as your last pick:</p>
       <div class="grid3"><button ${mini} data-act="selring:1">↕ Height</button><button ${mini} data-act="selring:0">↔ Width</button><button ${mini} data-act="selring:2">⤢ Depth</button></div>
       <p class="tip small">Alt+click an edge = its loop. Alt+click a face = its belt of faces.</p></div>
       <div class="sec"><b>Edit ✏️</b>
       <div class="grid3"><button ${mini} data-act="extrude">⬆ Extrude</button><button ${mini} data-act="inset">⬇ Inset</button><button ${mini} data-act="delsel">🗑 Delete</button></div>
-      <p class="tip small">G move · R turn · S size, like Blender. Then X / Y / Z to lock an axis, or type a number. Press ? for all keys.</p></div>`
-      : '';
+      <div class="grid3" style="margin-top:4px"><button ${mini} data-act="bevel" title="Ctrl+B">◢ Bevel</button><button ${mini} data-act="merge" title="M">⚫ Merge</button><button ${mini} data-act="fill" title="F">▣ Fill</button></div>
+      <label class="slider"><span>Bevel size</span><input type="range" id="bevelW" min="0.01" max="0.3" step="0.01" value="${state.bevelW}"></label>
+      <p class="tip small">Extrude a dot to pull out an edge, then Fill dots into a face. G move · R turn · S size, like Blender. Press ? for all keys.</p></div>
+      ${fcol}`
+        : `<div class="sec"><b>Points ✏️</b>
+      <p class="tip">Click dots, edges or faces. Shift+click or Shift+drag picks more. Then drag the arrows, or press ⬆ Extrude to push a face out.</p>
+      <p class="tip small">More tools: turn on 🛠️ Advanced at the top.</p></div>`;
   const swatch = PALETTE.map(
     (c) => `<button class="sw ${u.color.toLowerCase() === c ? 'on' : ''}" style="background:${c}" data-act="color:${c}" title="${c}"></button>`,
   ).join('');
@@ -1394,7 +1655,7 @@ document.addEventListener('click', (e) => {
     case 'stickto': return startStick();
     case 'cancelstick': return cancelStick();
     case 'unstick':
-      if (n && isPart(n)) stickTo(n, model);
+      if (n && isNode(n)) stickTo(n, model);
       return;
     case 'slice': return sliceSelected(+arg);
     case 'emode':
@@ -1405,6 +1666,16 @@ document.addEventListener('click', (e) => {
       return refresh();
     case 'extrude': return extrudeSel();
     case 'inset': return insetSel();
+    case 'bevel': return bevelSel();
+    case 'fcol': return faceColorBtn(arg, false);
+    case 'fclear': return clearFaceColors(false);
+    case 'fclearall': return clearFaceColors(true);
+    case 'merge': return mergeSel();
+    case 'fill': return fillSel();
+    case 'adv': return setAdvanced(!state.advanced);
+    case 'addbone': return addBone();
+    case 'delbone': return deleteBone(n);
+    case 'resetpose': return resetPose();
     case 'delsel': return deleteSel();
     case 'selall': return selectAll();
     case 'selnone': return selectNone();
@@ -1447,13 +1718,20 @@ document.addEventListener('input', (e) => {
   const n = state.selected;
   if (e.target.id === 'customColor' && n) setPaint(n, { color: e.target.value });
   if (e.target.id === 'texScale' && n) setPaint(n, { texScale: +e.target.value });
+  if (e.target.id === 'bevelW') state.bevelW = +e.target.value;
+  if (e.target.id === 'fcolCustom') faceColorBtn(e.target.value, true);
 });
 document.addEventListener('change', (e) => {
   const n = state.selected;
   const id = e.target.id;
   if (id === 'customColor' || id === 'texScale') commit();
+  else if (id === 'fcolCustom') {
+    if (state.tool === 'points' && pts && psel.length) commit();
+    else refresh();
+  } else if (id === 'carryChk') state.boneCarry = e.target.checked;
   else if (id === 'nameIn' && n) {
-    n.name = e.target.value || n.name;
+    const v = e.target.value || n.name;
+    n.name = isJoint(n) ? uniqueBoneName(v, n) : v;
     commit();
   } else if (id === 'projName') {
     state.name = e.target.value || 'my-model';
@@ -1497,20 +1775,26 @@ window.addEventListener('keydown', (e) => {
   const c = e.code;
   const n = state.selected;
   const editing = state.mode === 'build' && state.tool === 'points' && n && isPart(n);
+  const del_ = e.key === 'Delete' || e.key === 'Backspace';
   if (mod && c === 'KeyZ') {
     e.preventDefault();
     e.shiftKey ? redo() : undo();
   } else if (mod && c === 'KeyY') {
     e.preventDefault();
     redo();
+  } else if (c === 'Escape') state.sticking ? cancelStick() : select(null);
+  else if (state.mode !== 'build') return;
+  else if (!state.advanced) {
+    if (del_ && !editing) del(); // simple mode: just delete the picked part
   } else if (NUMPAD_VIEWS[c]) viewFrom(VIEWS[mod && c === 'Numpad1' ? 'back' : NUMPAD_VIEWS[c]]);
   else if (c === 'NumpadDecimal') frameModel();
-  else if (c === 'Escape') state.sticking ? cancelStick() : select(null);
   else if (e.key === '?') $('#keys').hidden = !$('#keys').hidden;
-  else if (state.mode !== 'build') return;
   else if (editing && mod && c === 'KeyI') {
     e.preventDefault();
     selectFlip();
+  } else if (editing && mod && c === 'KeyB') {
+    e.preventDefault();
+    bevelSel();
   } else if (editing && e.altKey && c === 'KeyA') selectNone();
   else if (mod) return;
   else if (c === 'Tab' && n && isPart(n)) {
@@ -1518,11 +1802,15 @@ window.addEventListener('keydown', (e) => {
     state.tool = editing ? 'move' : 'points';
     refresh();
   } else if (c === 'KeyG' || c === 'KeyR' || c === 'KeyS') startModal({ KeyG: 'move', KeyR: 'turn', KeyS: 'size' }[c]);
+  else if (n && isJoint(n) && c === 'KeyE') addBone();
+  else if (n && isJoint(n) && (c === 'KeyX' || del_)) deleteBone(n);
   else if (editing) {
     if (c === 'KeyE') extrudeSel();
     else if (c === 'KeyI') insetSel();
+    else if (c === 'KeyM') mergeSel();
+    else if (c === 'KeyF') fillSel();
     else if (c === 'KeyA') selectAll();
-    else if (c === 'KeyX' || e.key === 'Delete' || e.key === 'Backspace') deleteSel();
+    else if (c === 'KeyX' || del_) deleteSel();
     else if (c === 'Digit1' || c === 'Digit2' || c === 'Digit3') {
       state.emode = ['dot', 'edge', 'face'][+c.slice(-1) - 1];
       refresh();
@@ -1530,12 +1818,13 @@ window.addEventListener('keydown', (e) => {
   } else if (n && isPart(n) && c === 'KeyD' && e.shiftKey) {
     duplicate();
     startModal('move');
-  } else if (c === 'KeyX' || e.key === 'Delete' || e.key === 'Backspace') del();
+  } else if (c === 'KeyX' || del_) del();
 });
 
 // ---------------------------------------------------------------- loop
 function frame() {
   orbit.update();
+  model.traverse((o) => isPart(o) && ensureFaceColors(o));
   if (flags.bones) for (const j of jointsList()) updateBoneLine(j);
   renderer.render(scene, camera);
   requestAnimationFrame(frame);
@@ -1544,6 +1833,12 @@ function frame() {
 // ---------------------------------------------------------------- boot
 (function boot() {
   resize();
+  try {
+    state.advanced = localStorage.getItem('blockbuddy-advanced') === '1';
+  } catch (e) {
+    /* fine */
+  }
+  document.body.classList.toggle('adv', state.advanced);
   try {
     const saved = localStorage.getItem(AUTOSAVE);
     if (saved) {
@@ -1560,5 +1855,5 @@ function frame() {
   refresh();
   frame();
   // handy for testing / poking around in the console
-  window.__bb = { pts: () => pts, psel: () => psel, pivot, selectEls, loadDocJSON: (j) => loadDoc(JSON.parse(j)), state, model, scene, camera, orbit, transform, select, byId, registry, docJSON, applyPose, setMode, commit, undo, redo };
+  window.__bb = { THREE, pts: () => pts, psel: () => psel, pivot, selectEls, loadDocJSON: (j) => loadDoc(JSON.parse(j)), state, model, scene, camera, orbit, transform, select, byId, registry, docJSON, applyPose, setMode, commit, undo, redo };
 })();

@@ -205,6 +205,7 @@ export function sliceGeometry(g, axis, c, texScale) {
   outFace.forEach((id, t) => fArr.fill(id, t * 3, t * 3 + 3));
   ng.setAttribute('face', new THREE.BufferAttribute(fArr, 1));
   refreshGeometry(ng, texScale);
+  ng.userData.farIds = farId; // old face id -> new id of its far half
   return ng;
 }
 

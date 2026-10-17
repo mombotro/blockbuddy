@@ -84,6 +84,9 @@
     text-align: center; box-shadow: 0 10px 40px rgba(40,20,100,.2); max-width: 460px; }
   #welcome h2 { margin: 0 0 14px; font-size: 24px; }
   .link { border: 0; background: none; color: var(--brand); text-decoration: underline; padding: 0; }
+  .chip { display: inline-block; width: 14px; height: 14px; border-radius: 50%; border: 2px solid var(--line); vertical-align: -2px; }
+  .adv-only { display: none; }
+  body.adv .adv-only { display: inline-block; }
   .hidden { display: none !important; }
   #toast { position: fixed; top: 70px; left: 50%; transform: translate(-50%, -20px); background: var(--ink); color: var(--bg);
     padding: 10px 18px; border-radius: 16px; opacity: 0; pointer-events: none; transition: all .25s; z-index: 10; max-width: 90vw; text-align: center; }
@@ -104,6 +107,7 @@
     <button class="tab on" id="tab-build" data-act="mode:build">🔨 Build</button>
     <button class="tab" id="tab-pose" data-act="mode:pose">🕺 Pose</button>
     <span class="sp"></span>
+    <button id="advBtn" data-act="adv" title="Show the extra tools: Blender-style keys, bevel, merge, bones…">🛠️ Advanced</button>
     <button data-act="new" title="Start over">🆕</button>
     <button data-act="open" title="Open a saved model">📂 Open</button>
     <button data-act="save" title="Save to keep working later">💾 Save</button>
@@ -117,7 +121,7 @@
       <button data-act="view:back">Back</button><button data-act="view:top">Top</button>
       <button data-act="frame" title="Zoom to fit">🔍 Fit</button>
       <button data-act="spin" title="Spin around">🌀 Spin</button>
-      <button data-act="keys" title="Keyboard shortcuts (?)">⌨️ Keys</button>
+      <button data-act="keys" class="adv-only" title="Keyboard shortcuts (?)">⌨️ Keys</button>
     </div>
     <div id="toolbar"></div>
     <div id="keys" hidden>
@@ -125,6 +129,8 @@
       <p><b>Anywhere</b><br><kbd>G</kbd> move · <kbd>R</kbd> rotate · <kbd>S</kbd> scale. Then <kbd>X</kbd> <kbd>Y</kbd> <kbd>Z</kbd> lock an axis, type a number for an exact amount, click or <kbd>Enter</kbd> to accept, <kbd>Esc</kbd> to cancel.</p>
       <p><kbd>Tab</kbd> edit points on/off · <kbd>Shift</kbd>+<kbd>D</kbd> copy · <kbd>X</kbd> delete · <kbd>Ctrl/⌘</kbd>+<kbd>Z</kbd> undo · <kbd>Shift</kbd>+<kbd>Ctrl/⌘</kbd>+<kbd>Z</kbd> redo</p>
       <p><b>Editing points</b><br><kbd>1</kbd> dots · <kbd>2</kbd> edges · <kbd>3</kbd> faces<br><kbd>A</kbd> all · <kbd>Alt</kbd>+<kbd>A</kbd> none · <kbd>Ctrl</kbd>+<kbd>I</kbd> flip<br><kbd>Shift</kbd>+click or +drag = pick more · <kbd>Alt</kbd>+click edge/face = loop<br><kbd>E</kbd> extrude · <kbd>I</kbd> inset · <kbd>X</kbd> delete faces</p>
+      <p><b>Bones</b> (pick an orange dot)<br><kbd>E</kbd> add a bone from it · <kbd>G</kbd> move it · <kbd>X</kbd> delete it</p>
+      <p><kbd>M</kbd> merge dots · <kbd>F</kbd> fill dots with a face · <kbd>Ctrl</kbd>+<kbd>B</kbd> bevel</p>
       <p><b>Camera</b><br>left-drag spin · right-drag slide · scroll zoom<br>numpad <kbd>1</kbd> front · <kbd>3</kbd> side · <kbd>7</kbd> top · <kbd>Ctrl</kbd>+<kbd>1</kbd> back · <kbd>.</kbd> fit</p>
     </div>
     <div id="welcome" class="hidden"></div>
