@@ -2,6 +2,8 @@
 
 Simple 3D block modeler for kids. Builds models for three.js games.
 
+**Status: v0.1.0 alpha.** Things change and break. Known issue: skateboard, scooter and skate ramps (steep ramps still don't carry you up properly).
+
 **Run:** double-click `index.html`. No server or install needed.
 **Rebuild after editing `src/`:** `npm install` once, then `npm run build` (or `npm run dev` to watch).
 
