@@ -117,6 +117,8 @@ const state = {
   pgizmo: 'move', // inside points: move | turn | size
   selected: null,
   rig: null,
+  use: null, // what the model does in Play: car | hover | mount | shooter | swing
+  useCfg: { proj: 'dart', auto: false },
   snap: true,
   bonesUser: false,
   name: 'my-model',
@@ -144,6 +146,8 @@ function docJSON() {
     v: 1,
     name: state.name,
     rig: state.rig,
+    use: state.use,
+    useCfg: state.useCfg,
     nodes: kids(model).map(serializeNode),
   });
 }
@@ -177,6 +181,8 @@ function clearModel() {
 function loadDoc(doc, selId = null) {
   clearModel();
   state.rig = doc.rig || null;
+  state.use = doc.use || null;
+  state.useCfg = { proj: 'dart', auto: false, ...(doc.useCfg || {}) };
   if (doc.name) state.name = doc.name;
   for (const n of doc.nodes) deserialize(n, model);
   state.selected = byId(selId);
@@ -1089,6 +1095,26 @@ function deleteBone(j) {
   toast('Bone deleted. Its shapes stayed.');
   commit();
 }
+// Mark the round parts at the bottom of a car as wheels (the ones at the front steer).
+function findWheels() {
+  const parts = [];
+  model.traverse((o) => isPart(o) && parts.push(o));
+  if (!parts.length) return toast('Build a car first!');
+  const all = new THREE.Box3().setFromObject(model);
+  const cz = (all.min.z + all.max.z) / 2;
+  const low = all.min.y + (all.max.y - all.min.y) * 0.34;
+  let n = 0;
+  for (const part of parts) {
+    const pb = new THREE.Box3().setFromObject(part);
+    const round = part.userData.type === 'cylinder' || part.userData.type === 'ball' || /wheel/i.test(part.name);
+    if (!round || pb.min.y > low) continue;
+    const c = pb.getCenter(new THREE.Vector3());
+    part.userData.role = c.z > cz ? 'frontwheel' : 'wheel';
+    n++;
+  }
+  toast(n ? `Found ${n} wheel${n === 1 ? '' : 's'}! The front ones steer. 🔍` : 'No round parts near the bottom. Mark the wheels yourself: pick a part and set its job.');
+  commit();
+}
 function setAdvanced(on) {
   state.advanced = on;
   document.body.classList.toggle('adv', on);
@@ -1173,6 +1199,7 @@ function startWith(id) {
   const st = STARTERS[id];
   st.build(model);
   state.rig = st.rig;
+  state.use = ['dog', 'cat', 'horse'].includes(id) ? 'mount' : null; // the premade animals can be ridden
   state.name = id;
   state.selected = null;
   state.mode = 'build';
@@ -1186,6 +1213,7 @@ function newBlank() {
   if (partCount() > 0 && !confirm('Start over with an empty scene? (You can undo.)')) return;
   clearModel();
   state.rig = null;
+  state.use = null;
   state.selected = null;
   state.mode = 'build';
   applyBoneVisibility();
@@ -1249,6 +1277,7 @@ function enterPlay() {
       toast,
       hud: $('#play'),
       cloneModel: () => cloneClean(model),
+      getUse: () => ({ use: state.use, cfg: { ...state.useCfg }, name: state.name }),
     });
     window.__bb && (window.__bb.play = play);
   }
@@ -1287,6 +1316,19 @@ function renderPlayHud() {
         .map(([id, ic, l]) => `<button class="mini ${id === 'walk' ? 'on' : ''}" data-act="ride:${id}" title="${l}">${ic} ${l}</button>`)
         .join('')}</span>
     </div>
+    <div id="gearBar">${[['none', '✋', 'Hands'], ...['sword', 'bigsword', 'pistol', 'blaster', 'mega'].map((id) => [id, { sword: '🗡️', bigsword: '⚔️', pistol: '🔫', blaster: '💥', mega: '🎯' }[id], { sword: 'Foam sword', bigsword: 'Giant sword', pistol: 'Dart pistol', blaster: 'Blaster', mega: 'Mega shooter' }[id]])]
+      .map(([id, ic, l]) => `<button class="mini ${id === 'none' ? 'on' : ''}" data-act="gear:${id}" title="${l}">${ic} ${l}</button>`)
+      .join('')}<span id="gearAmmo"></span></div>
+    <div id="zoneBar"><span>Go to:</span>${[['start', '🏠 Start'], ['skate', '🛹 Skate park'], ['city', '🏙️ City'], ['range', '🎯 Target range']]
+      .map(([id, l]) => `<button class="mini" data-act="zone:${id}">${l}</button>`)
+      .join('')}<button class="mini" data-act="playload" title="Add a saved BlockBuddy model (.json) as a toy">📂 Add my saved model…</button></div>
+    <div id="vehBar"><span>Cars:</span>${[['kart', '🏎️ Go-kart'], ['truck', '🛻 Truck'], ['hover', '🛸 Hovercraft'], ['mine', '🚗 My vehicle']]
+      .map(([id, l]) => `<button class="mini" data-act="spawnveh:${id}">${l}</button>`)
+      .join('')}<span class="tip small">press E next to one to drive</span></div>
+    <div id="mountBar"><span>Ride a:</span>${[['horse', '🐴 Horse'], ['dog', '🐶 Dog'], ['cat', '🐱 Cat'], ['mine', '🦄 My animal']]
+      .map(([id, l]) => `<button class="mini" data-act="mount:${id}">${l}</button>`)
+      .join('')}<button class="mini" data-act="dismount">⬇️ Get off</button></div>
+    <div id="cross" hidden>+</div>
     <div id="rideCombo" hidden></div>
     <div id="rideScore" hidden></div>
     <div id="playHelp">
@@ -1295,6 +1337,8 @@ function renderPlayHud() {
       <span><kbd>C</kbd> crouch · <kbd>X</kbd> crawl · <kbd>E</kbd> pick up / drop · click or <kbd>F</kbd> throw (hold to throw harder)</span>
       <span>🧗 Walk into the <b>brown wall</b> to climb · 🏃 Run and jump next to a wall to <b>wall run</b> · 🤸 Pink pad = bounce</span>
       <span>🛹 <kbd>V</kbd> swap ride (skateboard · scooter · roller skates): <kbd>W</kbd> push · <kbd>A</kbd><kbd>D</kbd> steer · <kbd>S</kbd> brake · <kbd>Space</kbd> ollie · in the air <kbd>J</kbd> <kbd>K</kbd> <kbd>L</kbd> tricks, <kbd>G</kbd> grab, hold <kbd>A</kbd>/<kbd>D</kbd> to spin. Land clean to bank your combo!</span>
+      <span>🗡️ <kbd>Q</kbd> swap gear (foam swords, dart pistol, blaster, mega shooter) · click or <kbd>F</kbd> swing / shoot · <kbd>Z</kbd> reload · <kbd>Y</kbd> next zone. Pop balloons, hit the bullseyes, knock over dummies!</span>
+      <span>🚗 <kbd>E</kbd> next to a car to drive: <kbd>W</kbd><kbd>S</kbd> gas / reverse · <kbd>A</kbd><kbd>D</kbd> steer · <kbd>Space</kbd> brake · <kbd>Shift</kbd> boost · <kbd>U</kbd> flip upright · <kbd>E</kbd> get out</span>
       <span><kbd>1</kbd> box · <kbd>2</kbd> ball · <kbd>3</kbd> <b>your model</b> as a toy · <kbd>R</kbd> new playground · <kbd>T</kbd> go back to start</span>
       <span>Click the picture to look around with the mouse (<kbd>Esc</kbd> lets go). Arrow keys also turn the camera. Scroll to zoom. <kbd>H</kbd> hides this box.</span>
     </div>`;
@@ -1510,6 +1554,29 @@ function renderLeft() {
       <p class="tip small">Off = game file keeps the starting pose, so your game can animate it.</p>`;
     return;
   }
+  const USE_TIPS = {
+    car: 'In Play, walk up to it and press E to drive. Pick the wheels and mark them Wheel or Front wheel, and a Seat.',
+    hover: 'A hovercraft glides over the ground. Mark a Seat part to say where the driver sits.',
+    mount: 'Needs bones like the premade animals. In Play, press 🦄 My animal to ride it. Mark a Saddle part if you want.',
+    shooter: 'Pick a part and mark it Muzzle (where shots come out) and Grip (where the hand holds it). In Play it shows up in your gear (press Q).',
+    swing: 'Mark a Grip part (where the hand holds it). The far end does the whacking. In Play it shows up in your gear (press Q).',
+  };
+  const useBlock = `<h3>What can it do? ⚙️</h3>
+    <select id="useSel" class="sel">
+      ${[['', 'Just a model'], ['car', '🚗 It drives (car)'], ['hover', '🛸 It hovers (hovercraft)'], ['mount', '🐴 You can ride it (animal)'], ['shooter', '🔫 It shoots things'], ['swing', '🗡️ You swing it']]
+        .map(([v, l]) => `<option value="${v}" ${(state.use || '') === v ? 'selected' : ''}>${l}</option>`)
+        .join('')}
+    </select>
+    ${
+      state.use === 'shooter'
+        ? `<label class="check"><span>Shoots</span><select id="projSel" class="sel" style="width:auto">${[['dart', 'Foam darts'], ['ball', 'Bouncy balls'], ['confetti', 'Confetti pops']]
+            .map(([v, l]) => `<option value="${v}" ${state.useCfg.proj === v ? 'selected' : ''}>${l}</option>`)
+            .join('')}</select></label>
+      <label class="check"><input type="checkbox" id="autoChk" ${state.useCfg.auto ? 'checked' : ''}> Hold to keep shooting</label>`
+        : ''
+    }
+    ${state.use === 'car' ? `<button class="wide" data-act="findwheels">🔍 Find the wheels for me</button>` : ''}
+    ${state.use ? `<p class="tip small">${USE_TIPS[state.use]}</p>` : ''}`;
   el.innerHTML = `
     <h3>Add a shape</h3>
     <div class="grid3">${shapeBtns('add')}</div>
@@ -1517,6 +1584,7 @@ function renderLeft() {
     <div class="grid3">${Object.entries(STARTERS)
       .map(([id, s]) => `<button class="tile" data-act="start:${id}"><span>${s.icon}</span>${s.label}</button>`)
       .join('')}</div>
+    ${useBlock}
     <h3>Helpers</h3>
     <label class="check"><input type="checkbox" id="stickNewChk" ${state.stickNew ? 'checked' : ''}> New shapes stick onto the one I picked</label>
     <label class="check"><input type="checkbox" id="snapChk" ${state.snap ? 'checked' : ''}> Snap to grid</label>
@@ -1620,6 +1688,17 @@ function renderRight() {
   }
   const u = n.userData;
   const t = twinOf(n);
+  const ROLE_OPTS = {
+    car: [['', 'Just a shape'], ['wheel', 'Wheel (spins)'], ['frontwheel', 'Front wheel (spins and steers)'], ['seat', 'Seat']],
+    hover: [['', 'Just a shape'], ['seat', 'Seat']],
+    mount: [['', 'Just a shape'], ['seat', 'Saddle (where the rider sits)']],
+    shooter: [['', 'Just a shape'], ['muzzle', 'Muzzle (shots come out here)'], ['grip', 'Grip (hand holds here)']],
+    swing: [['', 'Just a shape'], ['grip', 'Grip (hand holds here)']],
+  }[state.use];
+  const roleBlock = ROLE_OPTS
+    ? `<div class="sec"><b>Job in the ${{ car: 'car 🚗', hover: 'hovercraft 🛸', mount: 'animal 🐴', shooter: 'shooter 🔫', swing: 'swinger 🗡️' }[state.use]}</b>
+      <select id="roleSel" class="sel">${ROLE_OPTS.map(([v, l]) => `<option value="${v}" ${(n.userData.role || '') === v ? 'selected' : ''}>${l}</option>`).join('')}</select></div>`
+    : '';
   const par = isNode(n.parent) ? n.parent : null;
   const mini = 'class="mini" style="font-size:13px"';
   const fcol = `<div class="sec"><b>Face color 🎨</b>
@@ -1656,6 +1735,7 @@ function renderRight() {
   ).join('');
   el.innerHTML = `
     <h3>Selected</h3>${editBox}
+    ${roleBlock}
     <input id="nameIn" value="${esc(n.name)}" maxlength="40">
     <div class="sec"><b>Shape</b><div class="grid6">${SHAPES.map(
       ([id, label, icon]) =>
@@ -1728,6 +1808,18 @@ document.addEventListener('click', (e) => {
       return play && play.setCharacter(arg);
     case 'ride':
       return play && play.setRide(arg);
+    case 'gear':
+      return play && play.setGear(arg);
+    case 'zone':
+      return play && play.goZone(arg);
+    case 'spawnveh':
+      return play && play.spawnVehicleNear(arg);
+    case 'mount':
+      return play && play.mount(arg);
+    case 'dismount':
+      return play && play.dismount();
+    case 'playload':
+      return $('#playFile').click();
     case 'shape': return swapShapeTo(arg);
     case 'stick': return stickOn(arg);
     case 'stickto': return startStick();
@@ -1745,6 +1837,7 @@ document.addEventListener('click', (e) => {
     case 'extrude': return extrudeSel();
     case 'inset': return insetSel();
     case 'bevel': return bevelSel();
+    case 'findwheels': return findWheels();
     case 'fcol': return faceColorBtn(arg, false);
     case 'fclear': return clearFaceColors(false);
     case 'fclearall': return clearFaceColors(true);
@@ -1806,6 +1899,20 @@ document.addEventListener('change', (e) => {
   else if (id === 'fcolCustom') {
     if (state.tool === 'points' && pts && psel.length) commit();
     else refresh();
+  } else if (id === 'useSel') {
+    state.use = e.target.value || null;
+    commit();
+  } else if (id === 'projSel') {
+    state.useCfg = { ...state.useCfg, proj: e.target.value };
+    commit();
+  } else if (id === 'autoChk') {
+    state.useCfg = { ...state.useCfg, auto: e.target.checked };
+    commit();
+  } else if (id === 'roleSel' && n) {
+    n.userData.role = e.target.value || null;
+    const t = twinOf(n);
+    if (t) t.userData.role = n.userData.role;
+    commit();
   } else if (id === 'carryChk') state.boneCarry = e.target.checked;
   else if (id === 'nameIn' && n) {
     const v = e.target.value || n.name;
@@ -1822,7 +1929,16 @@ document.addEventListener('change', (e) => {
     state.bonesUser = e.target.checked;
     applyBoneVisibility();
   } else if (id === 'keepPose') state.keepPose = e.target.checked;
-  else if (id === 'openFile' && e.target.files[0]) {
+  else if (id === 'playFile') {
+    for (const f of e.target.files) f.text().then((t) => {
+      try {
+        play && play.addDoc(JSON.parse(t), f.name.replace(/\.[^.]+$/, ''));
+      } catch (err) {
+        toast("That file isn't a BlockBuddy model: " + err.message);
+      }
+    });
+    e.target.value = '';
+  } else if (id === 'openFile' && e.target.files[0]) {
     openProject(e.target.files[0]);
     e.target.value = '';
   } else if (id === 'picFile' && e.target.files[0] && n) {
@@ -1915,6 +2031,22 @@ function frame() {
 }
 
 // ---------------------------------------------------------------- boot
+// drop a saved .json model onto the playground to add it
+window.addEventListener('dragover', (e) => state.mode === 'play' && e.preventDefault());
+window.addEventListener('drop', (e) => {
+  if (state.mode !== 'play' || !e.dataTransfer || !e.dataTransfer.files.length) return;
+  e.preventDefault();
+  for (const f of e.dataTransfer.files)
+    if (/\.json$/i.test(f.name))
+      f.text().then((t) => {
+        try {
+          play.addDoc(JSON.parse(t), f.name.replace(/\.[^.]+$/, ''));
+        } catch (err) {
+          toast("That file isn't a BlockBuddy model: " + err.message);
+        }
+      });
+});
+
 (function boot() {
   resize();
   try {

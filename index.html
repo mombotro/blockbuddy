@@ -49,6 +49,7 @@
   .sec > b { display: block; margin-bottom: 6px; }
   .tip { color: var(--soft); font-size: 13px; margin: 6px 0; font-weight: 600; } .tip.small { font-size: 12px; }
   .check { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin: 8px 0; font-size: 14px; }
+  .sel { font: inherit; width: 100%; padding: 7px 8px; border-radius: 12px; border: 2px solid var(--line); background: var(--bg); color: inherit; }
   .check input[type=checkbox] { width: 20px; height: 20px; accent-color: var(--brand); }
   input[type=color] { width: 48px; height: 32px; border: 2px solid var(--line); border-radius: 10px; padding: 0; background: none; }
   .swatches { display: grid; grid-template-columns: repeat(8, 1fr); gap: 5px; }
@@ -98,6 +99,17 @@
   #playTop { position: absolute; top: 10px; left: 10px; right: 10px; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
   #playTop .who { display: flex; gap: 4px; flex-wrap: wrap; align-items: center; background: var(--panel); border: 2px solid var(--line); border-radius: 16px; padding: 4px 8px; font-size: 13px; }
   #playTop .mini { font-size: 13px; padding: 3px 8px; }
+  #gearBar { position: absolute; right: 10px; bottom: 10px; display: flex; gap: 4px; flex-wrap: wrap; justify-content: flex-end; align-items: center; max-width: 52%; background: var(--panel); border: 2px solid var(--line); border-radius: 16px; padding: 6px 8px; pointer-events: auto; }
+  #gearBar .mini { font-size: 13px; padding: 3px 8px; }
+  #gearAmmo { font-size: 13px; color: var(--soft); min-width: 90px; text-align: right; }
+  #zoneBar { position: absolute; left: 10px; top: 96px; display: flex; gap: 4px; align-items: center; flex-wrap: wrap; background: var(--panel); border: 2px solid var(--line); border-radius: 16px; padding: 4px 8px; font-size: 13px; pointer-events: auto; }
+  #zoneBar .mini { font-size: 13px; padding: 3px 8px; }
+  #mountBar { position: absolute; left: 10px; top: 172px; display: flex; gap: 4px; align-items: center; flex-wrap: wrap; background: var(--panel); border: 2px solid var(--line); border-radius: 16px; padding: 4px 8px; font-size: 13px; pointer-events: auto; }
+  #mountBar .mini { font-size: 13px; padding: 3px 8px; }
+  #vehBar { position: absolute; left: 10px; top: 134px; display: flex; gap: 4px; align-items: center; flex-wrap: wrap; background: var(--panel); border: 2px solid var(--line); border-radius: 16px; padding: 4px 8px; font-size: 13px; pointer-events: auto; }
+  #vehBar .mini { font-size: 13px; padding: 3px 8px; }
+  #cross { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); font-size: 34px; font-weight: 300; color: #fff; text-shadow: 0 0 4px #000, 0 0 2px #000; pointer-events: none; }
+  #cross[hidden] { display: none; }
   #rideCombo { position: absolute; top: 64px; left: 0; right: 0; text-align: center; font-size: 26px; font-weight: 800; color: #fff; text-shadow: 0 2px 6px rgba(40,20,100,.7); pointer-events: none; }
   #rideScore { position: absolute; top: 62px; right: 12px; background: var(--panel); border: 2px solid var(--line); border-radius: 16px; padding: 6px 12px; font-size: 14px; }
   #rideCombo[hidden], #rideScore[hidden] { display: none; }
@@ -159,6 +171,7 @@
 <div id="toast"></div>
 <input type="file" id="openFile" accept=".json,application/json" hidden>
 <input type="file" id="picFile" accept="image/*" hidden>
+<input type="file" id="playFile" accept=".json,application/json" multiple hidden>
 <script src="blockbuddy.js"></script>
 </body>
 </html>

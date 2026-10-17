@@ -49,6 +49,27 @@ Press **🎮 Play** at the top to drop your model into a playground. Pick **My m
 
 Tricks stack into a combo. Land clean to bank it (points × number of tricks); land crooked, mid-trick or sideways and you bail and lose the combo. The skate park has a halfpipe, rails, a kicker, a fun box and a ledge.
 
+### ⚔️ Foam swords and dart guns, 🏙️ the city, 🚗 cars, 🐴 riding animals
+- **Gear:** `Q` cycles foam sword, giant foam sword, dart pistol, foam blaster and mega shooter (or click the gear bar). Click / `F` swings or shoots, `Z` reloads. Swing at crates, balloons and foam dummies, shoot balloons and bullseyes at the target range. Guns aim where the camera points (crosshair).
+- **City:** a block city of climbable buildings (walk into any wall to climb, mantle onto the roof), alleys for wall running, sky bridges, launch pads, a plaza with stairs / rail / ledge / quarter pipe, and sedans on the streets.
+- **Zones:** the Go to bar (or `Y`) jumps to the start, skate park, city or target range. `T` goes home.
+- **Driving:** walk up to a car, kart, truck or hovercraft and press `E`. `W`/`S` gas and reverse, `A`/`D` steer, `Space` brake (hop for the hovercraft), `Shift` boost, `U` flip upright, `E` get out. The **Cars** bar spawns more.
+- **Riding animals:** the **Ride a** bar (Horse, Dog, Cat, My animal). You become the animal (it runs, jumps and climbs as it always does) with your old character sitting on its back. **Get off** hops down.
+- **Add your own files:** **📂 Add my saved model…** (or drag a `.json` onto the picture) drops a saved BlockBuddy model into the playground. Small models are toys, huge ones are solid and climbable, and models marked below do their job.
+
+### ⚙️ "What can it do?" (in the editor, left panel)
+Mark a model as: **drives** (car), **hovers**, **rideable animal**, **shoots things** or **swingable**. It is saved in the file, so it works when loaded into Play. Pick a part and give it a job:
+
+| model is | part jobs |
+|---|---|
+| car | Wheel, Front wheel (steers), Seat. "Find the wheels for me" marks round parts near the bottom. No wheels marked? It still drives. |
+| hovercraft | Seat |
+| rideable animal | Saddle. Needs the bones of the premade animals (the premade horse, dog and cat are already marked) |
+| shooter | Muzzle (shots come out here), Grip (hand holds here). Shoots foam darts, bouncy balls or confetti, one at a time or hold to keep shooting |
+| swingable | Grip (hand holds here). The long side becomes the blade |
+
+Your marked model appears in Play automatically: shooters and swingables in the gear bar, cars under **My vehicle**, animals under **My animal**.
+
 Legs are procedural IK, so feet land on stairs and ramps and every limb steps for itself. Hands reach for what you carry. The world scales to your model (a cat gets a small playground).
 For **your own animals**, name the limb bones like the premade ones: `LeftHip` -> `LeftKnee` -> `LeftAnkle` (or `FrontLeftShoulder` -> `FrontLeftKnee`, also `Left/RightShoulder` -> `Elbow` -> `Wrist` for arms). Bones named `Hips`, `Spine`, `Neck`, `Head`, `Tail…` and `LeftWing`/`RightWing` get extra motion. A model with no limb bones slides around.
 Physics is [cannon-es](https://github.com/pmndrs/cannon-es), bundled in.
@@ -73,6 +94,8 @@ Animate by rotating bones by name, or build an AnimationClip with tracks like `L
 - `src/rigs.js` buddy and starter builders, pose presets
 - `src/editmesh.js` faces, edges, extrude, inset, bevel, merge, fill, loops
 - `src/play.js` Play mode: world, character controller, IK walker
+- `src/ride.js` skateboard, scooter, roller skate models and tricks
+- `src/gear.js` foam swords, dart guns, darts
 - `src/main.js` scene, gizmos, picking, UI, export
 
 ## Not built yet (ideas)

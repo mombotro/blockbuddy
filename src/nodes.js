@@ -119,6 +119,7 @@ export function makePart(type, parent, wp, size, opts = {}) {
     texScale: o.texScale,
     twin: null,
     faceColors: {},
+    role: null,
   };
   mesh.rotation.set(...o.rot.map((d) => (d * Math.PI) / 180));
   parent.add(mesh);
@@ -169,6 +170,7 @@ export function mirrorSubtree(src, newParent) {
       texScale: u.texScale,
       twin: u.id,
       faceColors: { ...(u.faceColors || {}) },
+      role: u.role || null,
     };
   }
   c.name = swapSide(src.name);
@@ -254,6 +256,7 @@ export function serializeNode(n) {
     d.verts = r4(n.geometry.attributes.position.array);
     d.faces = facesToTris(n.geometry);
     if (u.faceColors && Object.keys(u.faceColors).length) d.fcol = u.faceColors;
+    if (u.role) d.role = u.role;
   }
   return d;
 }
@@ -283,6 +286,7 @@ export function deserialize(d, parent, opt = {}) {
       texScale: d.texScale,
       twin: null,
       faceColors: { ...(d.fcol || {}) },
+      role: d.role || null,
     };
   }
   if (!opt.fresh) n.userData.twin = d.twin || null;

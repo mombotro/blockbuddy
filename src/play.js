@@ -1,8 +1,9 @@
 import * as THREE from 'three';
 import * as CANNON from 'cannon-es';
 import { STARTERS } from './rigs.js';
-import { registry } from './nodes.js';
+import { registry, deserialize } from './nodes.js';
 import { RIDES, RIDE_ORDER, TRICKS, buildVehicle, buildSkate } from './ride.js';
+import { GEAR, GEAR_ORDER, buildGear, buildDart } from './gear.js';
 
 // ============================================================================
 // Play mode: a physics sandbox for testing models.
@@ -21,6 +22,8 @@ const UP = V(0, 1, 0);
 const WORLD = 1;
 const PLAYER = 2;
 const HELD = 4;
+const DART = 8;
+const ALL = 15; // WORLD | PLAYER | HELD | DART: collides with everything
 const GRAVITY = 24;
 const isJoint = (o) => !!o && o.userData && o.userData.kind === 'joint';
 const childJoints = (j) => j.children.filter(isJoint);
@@ -32,7 +35,7 @@ export function cloneClean(root) {
   root.traverse((o) => {
     saved.push([o, o.userData]);
     const u = o.userData || {};
-    o.userData = { kind: u.kind, helper: !!u.helper };
+    o.userData = { kind: u.kind, helper: !!u.helper, role: u.role || null };
   });
   const c = root.clone(true);
   saved.forEach(([o, u]) => (o.userData = u));
@@ -109,7 +112,7 @@ export function createPlay(ctx) {
     t.colorSpace = THREE.SRGBColorSpace;
     return t;
   };
-  function addBox({ size, pos, rot = [0, 0, 0], color = 0xdddddd, mass = 0, climb = false, bounce = false, pickable = false, tex = null, restitution = 0, solid = true }) {
+  function addBox({ size, pos, rot = [0, 0, 0], color = 0xdddddd, mass = 0, climb = false, bounce = false, launch = false, pickable = false, tex = null, restitution = 0, solid = true }) {
     const s = size.map((v) => v * ws);
     const g = new THREE.BoxGeometry(s[0], s[1], s[2]);
     ownGeos.push(g);
@@ -127,8 +130,9 @@ export function createPlay(ctx) {
     body.position.set(mesh.position.x, mesh.position.y, mesh.position.z);
     body.quaternion.setFromEuler(rot[0], rot[1], rot[2]);
     body.collisionFilterGroup = WORLD;
-    body.collisionFilterMask = WORLD | PLAYER | HELD;
-    body.userData = { climb, bounce, pickable, mesh, size: Math.max(...s), mass };
+    body.collisionFilterMask = ALL;
+    body.userData = { climb, bounce, launch, pickable, mesh, size: Math.max(...s), mass };
+    lastBody = body;
     if (restitution) body.material = bounceMat;
     world.addBody(body);
     if (mass) {
@@ -150,7 +154,7 @@ export function createPlay(ctx) {
     body.addShape(new CANNON.Sphere(rr));
     body.position.copy(mesh.position);
     body.collisionFilterGroup = WORLD;
-    body.collisionFilterMask = WORLD | PLAYER | HELD;
+    body.collisionFilterMask = ALL;
     body.linearDamping = 0.05;
     body.angularDamping = 0.2;
     body.userData = { pickable: true, mesh, size: rr * 2, mass };
@@ -182,6 +186,13 @@ export function createPlay(ctx) {
   }
   let groundMat, propMat, ballMat, bounceMat, playerMat;
   let rails = [];
+  let lastBody = null;
+  let balloons = [];
+  let dummies = [];
+  let respawns = [];
+  let darts = [];
+  let fx = [];
+  let popups = [];
 
   function buildScene() {
     scene = new THREE.Scene();
@@ -285,6 +296,7 @@ export function createPlay(ctx) {
     for (let i = 0; i < 16; i++) {
       const a = i * 2.4;
       const rr = 38 + (i % 5) * 7;
+      if (Math.cos(a) * rr < -28 || (Math.sin(a) * rr < -15 && Math.cos(a) * rr > 0 && Math.cos(a) * rr < 45)) continue;
       const tx = Math.cos(a) * rr * ws;
       const tz = Math.sin(a) * rr * ws;
       const trunk = new THREE.Mesh(new THREE.CylinderGeometry(0.25 * ws, 0.35 * ws, 2 * ws, 8), new THREE.MeshStandardMaterial({ color: 0x8d6e63 }));
@@ -296,6 +308,9 @@ export function createPlay(ctx) {
       ownGeos.push(trunk.geometry, top.geometry);
     }
     buildSkatePark();
+    buildRange();
+    buildCity();
+    buildVehicles();
   }
 
 
@@ -337,7 +352,7 @@ export function createPlay(ctx) {
     body.position.set(m.position.x, m.position.y, m.position.z);
     body.quaternion.set(q.x, q.y, q.z, q.w);
     body.collisionFilterGroup = WORLD;
-    body.collisionFilterMask = WORLD | PLAYER | HELD;
+    body.collisionFilterMask = ALL;
     body.userData = { rail: true };
     world.addBody(body);
     statics.push(body);
@@ -356,6 +371,223 @@ export function createPlay(ctx) {
     addBox({ size: [5, 0.7, 5], pos: [48, 0.35, 29], color: 0xa3b1c2 }); // fun box
     addBox({ size: [5, 0.3, 3], pos: [48, 0.33, 25.9], rot: [0.28, 0, 0], color: 0xffb703 });
     addBox({ size: [6, 0.5, 1], pos: [38, 0.25, 17], color: 0x9aa5b1 }); // ledge
+  }
+
+
+  // ------------------------------------------------------------------ target range
+  function addBalloon(pos, color) {
+    const rr = 0.32 * ws;
+    const g = new THREE.SphereGeometry(rr, 14, 10);
+    ownGeos.push(g);
+    const mesh = new THREE.Mesh(g, new THREE.MeshStandardMaterial({ color, roughness: 0.25, metalness: 0.1 }));
+    mesh.scale.set(1, 1.18, 1);
+    mesh.castShadow = true;
+    const home = V(pos[0] * ws, pos[1] * ws, pos[2] * ws);
+    mesh.position.copy(home);
+    const sg = new THREE.BufferGeometry().setFromPoints([V(0, -rr * 1.2, 0), V(0, -rr * 1.2 - 1.4 * ws, 0)]);
+    ownGeos.push(sg);
+    mesh.add(new THREE.Line(sg, new THREE.LineBasicMaterial({ color: 0xcbd5e1 })));
+    scene.add(mesh);
+    const body = new CANNON.Body({ mass: 0, material: ballMat });
+    body.addShape(new CANNON.Sphere(rr * 1.05));
+    body.position.set(home.x, home.y, home.z);
+    body.collisionFilterGroup = WORLD;
+    body.collisionFilterMask = DART | HELD | WORLD; // you walk through balloons; darts and thrown things pop them
+    body.userData = { balloon: true, mesh, size: rr * 2, color, pos, home, phase: Math.random() * 6 };
+    world.addBody(body);
+    balloons.push(body);
+  }
+  function addBull(pos, size) {
+    addBox({ size: [size, size, 0.25], pos, color: 0x94a3b8 });
+    const body = lastBody;
+    body.userData.bull = true;
+    const cv = document.createElement('canvas');
+    cv.width = cv.height = 256;
+    const c = cv.getContext('2d');
+    [['#ef4444', 128], ['#ffffff', 100], ['#ef4444', 72], ['#ffffff', 44], ['#fde047', 20]].forEach(([col, r]) => {
+      c.fillStyle = col;
+      c.beginPath();
+      c.arc(128, 128, r, 0, 7);
+      c.fill();
+    });
+    const tex = new THREE.CanvasTexture(cv);
+    tex.colorSpace = THREE.SRGBColorSpace;
+    const plane = new THREE.Mesh(new THREE.PlaneGeometry(size * ws * 0.96, size * ws * 0.96), new THREE.MeshBasicMaterial({ map: tex }));
+    ownGeos.push(plane.geometry);
+    plane.position.set(0, 0, (0.125 + 0.004) * ws);
+    body.userData.mesh.add(plane);
+  }
+  function addDummy(pos, color) {
+    const m = addBox({ size: [0.55, 1.35, 0.3], pos, mass: 4, color, pickable: true });
+    const body = lastBody;
+    body.userData.dummy = true;
+    const head = new THREE.Mesh(new THREE.SphereGeometry(0.24 * ws, 14, 10), new THREE.MeshStandardMaterial({ color: 0xfde68a }));
+    ownGeos.push(head.geometry);
+    head.position.set(0, (1.35 / 2 + 0.2) * ws, 0);
+    head.castShadow = true;
+    m.add(head);
+    dummies.push({ body, home: { p: body.position.clone(), q: body.quaternion.clone() }, scored: false, downT: 0 });
+  }
+  function buildRange() {
+    sign('TARGET RANGE', [20, 6, -22]);
+    addBox({ size: [18, 5.5, 0.5], pos: [20, 2.75, -35.5], color: 0x64748b });
+    addBull([14.5, 2.4, -35.1], 2);
+    addBull([20, 3.4, -35.1], 2);
+    addBull([25.5, 2.4, -35.1], 2);
+    addBox({ size: [18, 0.9, 0.3], pos: [20, 0.45, -23], color: 0x94a3b8 });
+    const cols = [0xef476f, 0xffd166, 0x06d6a0, 0x118ab2, 0x9d4edd, 0xfb8500];
+    for (let i = 0; i < 12; i++) addBalloon([12 + (i % 6) * 3.1 + (i > 5 ? 1.4 : 0), 2.4 + (i % 3) * 1.7 + (i > 5 ? 1 : 0), -26.5 - (i > 5 ? 3 : 0)], cols[i % 6]);
+    for (let i = 0; i < 5; i++) addDummy([13 + i * 3.4, 0.7, -30.5], cols[(i + 2) % 6]);
+  }
+
+  // ------------------------------------------------------------------ the city
+  const facadeCache = {};
+  function facade(i) {
+    if (facadeCache[i]) return facadeCache[i];
+    const pal = [['#e7c9a9', '#5b7a99'], ['#c9d6df', '#334e68'], ['#e8b4b8', '#52606d'], ['#d9e4dd', '#3d5a80'], ['#f0e3b2', '#3f5f6a'], ['#c7b8ea', '#4a4e69']][i % 6];
+    const cv = document.createElement('canvas');
+    cv.width = cv.height = 128;
+    const c = cv.getContext('2d');
+    c.fillStyle = pal[0];
+    c.fillRect(0, 0, 128, 128);
+    for (let y = 0; y < 2; y++)
+      for (let x = 0; x < 2; x++) {
+        c.fillStyle = Math.random() < 0.3 ? '#ffe9a8' : pal[1];
+        c.fillRect(10 + x * 58, 12 + y * 58, 44, 40);
+        c.fillStyle = 'rgba(0,0,0,.18)';
+        c.fillRect(10 + x * 58, 12 + y * 58, 44, 4);
+      }
+    facadeCache[i] = cv;
+    return cv;
+  }
+  function addBuilding(x, z, w, d, h, style) {
+    const cv = facade(style);
+    const mk = (faceW) => {
+      const t = new THREE.CanvasTexture(cv);
+      t.wrapS = t.wrapT = THREE.RepeatWrapping;
+      t.colorSpace = THREE.SRGBColorSpace;
+      t.repeat.set(Math.max(1, Math.round(faceW / 3.4)), Math.max(1, Math.round(h / 3.6)));
+      return new THREE.MeshStandardMaterial({ map: t, roughness: 0.9 });
+    };
+    const mx = mk(d);
+    const mz = mk(w);
+    const roof = new THREE.MeshStandardMaterial({ color: 0x6b7280, roughness: 0.95 });
+    const g = new THREE.BoxGeometry(w * ws, h * ws, d * ws);
+    ownGeos.push(g);
+    const mesh = new THREE.Mesh(g, [mx, mx, roof, roof, mz, mz]);
+    mesh.castShadow = true;
+    mesh.receiveShadow = true;
+    mesh.position.set(x * ws, (0.18 + h / 2) * ws, z * ws);
+    scene.add(mesh);
+    const body = new CANNON.Body({ mass: 0, material: groundMat });
+    body.addShape(new CANNON.Box(new CANNON.Vec3((w * ws) / 2, (h * ws) / 2, (d * ws) / 2)));
+    body.position.copy(mesh.position);
+    body.collisionFilterGroup = WORLD;
+    body.collisionFilterMask = ALL;
+    body.userData = { climb: true, mesh, size: Math.max(w, h, d) * ws, mass: 0 };
+    world.addBody(body);
+    statics.push(body);
+    return mesh;
+  }
+  function buildCity() {
+    let seed = 7;
+    const rnd = () => (seed = (seed * 1664525 + 1013904223) % 4294967296) / 4294967296;
+    const CX = -92;
+    const BW = 18;
+    const ST = 9;
+    const COLS = 4;
+    const ROWS = 5;
+    const pitch = BW + ST;
+    sign('CITY', [-34, 7.5, 0]);
+    sign('Climb everything! Run the rooftops!', [-45, 12, 0]);
+    addBox({ size: [COLS * pitch + ST, 0.3, ROWS * pitch + ST], pos: [CX, -0.14, 0], color: 0x3a3f4a });
+    // street lines
+    for (let r = 0; r <= ROWS; r++) addBox({ size: [COLS * pitch + ST, 0.02, 0.18], pos: [CX, 0.02, (r - ROWS / 2) * pitch], color: 0xfde68a, solid: false });
+    for (let c = 0; c <= COLS; c++) addBox({ size: [0.18, 0.02, ROWS * pitch + ST], pos: [CX + (c - COLS / 2) * pitch, 0.02, 0], color: 0xfde68a, solid: false });
+    const roofs = [];
+    for (let col = 0; col < COLS; col++)
+      for (let row = 0; row < ROWS; row++) {
+        const bx = CX + (col - (COLS - 1) / 2) * pitch;
+        const bz = (row - (ROWS - 1) / 2) * pitch;
+        addBox({ size: [BW + 2, 0.18, BW + 2], pos: [bx, 0.0, bz], color: 0xbfc4cc }); // sidewalk, a curb to skate off
+        if (col === 1 && row === 2) {
+          cityPlaza(bx, bz);
+          continue;
+        }
+        const pat = Math.floor(rnd() * 3);
+        const base = 7 + rnd() * 20;
+        const tower = rnd() < 0.14;
+        const H = (tower ? 36 + rnd() * 12 : base);
+        const S = Math.floor(rnd() * 6);
+        if (pat === 0) roofs.push(addBuildingFull(bx, bz, BW - 3, BW - 3, H, S, rnd));
+        else if (pat === 1) {
+          // two buildings of the same height with an alley and a sky bridge between them
+          const aw = 5;
+          const w2 = (BW - 3 - aw) / 2;
+          const h2 = 8 + rnd() * 14;
+          roofs.push(addBuildingFull(bx - (aw + w2) / 2, bz, w2, BW - 3, h2, S, rnd));
+          roofs.push(addBuildingFull(bx + (aw + w2) / 2, bz, w2, BW - 3, h2, (S + 1) % 6, rnd));
+          addBox({ size: [aw + 1.2, 0.35, 2.6], pos: [bx, 0.18 + h2 - 0.18, bz + (rnd() - 0.5) * 6], color: 0x7d8597 });
+        } else {
+          const q = (BW - 3 - 3) / 2;
+          for (let i = 0; i < 4; i++) roofs.push(addBuildingFull(bx + (i % 2 ? 1 : -1) * (q / 2 + 1.5), bz + (i < 2 ? -1 : 1) * (q / 2 + 1.5), q, q, 5 + rnd() * 16, (S + i) % 6, rnd));
+        }
+      }
+    // cars on the streets
+    const carCols = [0xef476f, 0xffd166, 0x06d6a0, 0x118ab2, 0x9d4edd, 0xfb8500];
+    for (let i = 0; i < 16; i++) {
+      const alongX = i % 2 === 0;
+      const lane = Math.floor(rnd() * (alongX ? ROWS + 1 : COLS + 1));
+      const off = (rnd() - 0.5) * (alongX ? COLS * pitch : ROWS * pitch);
+      const px = alongX ? CX + off : CX + (lane - COLS / 2) * pitch + (rnd() < 0.5 ? 2.2 : -2.2);
+      const pz = alongX ? (lane - ROWS / 2) * pitch + (rnd() < 0.5 ? 2.2 : -2.2) : off;
+      addBox({ size: alongX ? [4.2, 1.4, 1.9] : [1.9, 1.4, 4.2], pos: [px, 0.7, pz], color: carCols[i % 6] });
+      addBox({ size: alongX ? [2.2, 0.55, 1.7] : [1.7, 0.55, 2.2], pos: [px, 1.65, pz], color: 0xcbd5e1, solid: false });
+    }
+    // launch pads at some street corners: they throw you up onto the roofs
+    for (let i = 0; i < 9; i++) {
+      const c = Math.floor(rnd() * (COLS - 0)) ;
+      const r = Math.floor(rnd() * ROWS);
+      const px = CX + (c - (COLS - 1) / 2) * pitch + BW / 2 + 1.6;
+      const pz = (r - (ROWS - 1) / 2) * pitch + (rnd() - 0.5) * 8;
+      addBox({ size: [2.4, 0.2, 2.4], pos: [px, 0.1, pz], color: 0xff5d8f, bounce: true, launch: true });
+    }
+    void roofs;
+  }
+  function addBuildingFull(x, z, w, d, h, style, rnd) {
+    addBuilding(x, z, w, d, h, style);
+    const roofY = 0.18 + h;
+    // things on the roof: air-conditioners to hop on, now and then a water tower or a launch pad
+    for (let i = 0; i < 1 + Math.floor(rnd() * 3); i++) addBox({ size: [1.4, 0.9, 1.4], pos: [x + (rnd() - 0.5) * (w - 3), roofY + 0.45, z + (rnd() - 0.5) * (d - 3)], color: 0x9aa5b1 });
+    if (rnd() < 0.3) addBox({ size: [2.2, 0.2, 2.2], pos: [x + (rnd() - 0.5) * (w - 4), roofY + 0.1, z + (rnd() - 0.5) * (d - 4)], color: 0xff5d8f, bounce: true, launch: true });
+    if (rnd() < 0.22) {
+      const tw = new THREE.Mesh(new THREE.CylinderGeometry(1.1 * ws, 1.1 * ws, 2 * ws, 12), new THREE.MeshStandardMaterial({ color: 0x8d6e63 }));
+      const cone = new THREE.Mesh(new THREE.ConeGeometry(1.3 * ws, 0.9 * ws, 12), new THREE.MeshStandardMaterial({ color: 0x6d4c41 }));
+      tw.position.set((x + w / 2 - 2) * ws, (roofY + 3) * ws, z * ws);
+      cone.position.set((x + w / 2 - 2) * ws, (roofY + 4.4) * ws, z * ws);
+      tw.castShadow = cone.castShadow = true;
+      scene.add(tw, cone);
+      ownGeos.push(tw.geometry, cone.geometry);
+    }
+    return roofY;
+  }
+  function cityPlaza(bx, bz) {
+    // a park plaza: fountain, trees, benches, plus stairs, a rail, a ledge and a quarter pipe for skating
+    addBox({ size: [5, 0.7, 5], pos: [bx, 0.5, bz], color: 0x94a3b8 });
+    addBox({ size: [3.4, 0.3, 3.4], pos: [bx, 0.95, bz], color: 0x7dd3fc });
+    for (let i = 0; i < 6; i++) addBox({ size: [5, 0.2 * (i + 1), 0.8], pos: [bx - 11, 0.1 * (i + 1) + 0.18, bz - 6 + i * 0.8], color: 0xcbd5e1 });
+    addRail([bx - 7.5, 1.3, bz - 6], [bx - 7.5, 0.3, bz - 1.2]);
+    addBox({ size: [6, 0.5, 1], pos: [bx + 6, 0.45, bz + 6], color: 0x9aa5b1 });
+    quarterPipe({ x: bx + 3, z: bz - 6, width: 6, R: 2.2, dir: 1, color: 0xc7ced9 });
+    for (const [tx, tz] of [[-6, 6], [6, -2], [-6, -6], [2, 7]]) {
+      const trunk = new THREE.Mesh(new THREE.CylinderGeometry(0.25 * ws, 0.32 * ws, 2 * ws, 8), new THREE.MeshStandardMaterial({ color: 0x8d6e63 }));
+      const top = new THREE.Mesh(new THREE.ConeGeometry(1.5 * ws, 3.6 * ws, 9), new THREE.MeshStandardMaterial({ color: 0x2d9b4f }));
+      trunk.position.set((bx + tx) * ws, ws, (bz + tz) * ws);
+      top.position.set((bx + tx) * ws, 3.6 * ws, (bz + tz) * ws);
+      trunk.castShadow = top.castShadow = true;
+      scene.add(trunk, top);
+      ownGeos.push(trunk.geometry, top.geometry);
+    }
   }
 
   // ------------------------------------------------------------------ character
@@ -433,16 +665,36 @@ export function createPlay(ctx) {
       H: size.y, W: size.x, D: size.z,
       pitch: 0, roll: 0, hipsDy: 0, armZ: 0, phase: 0,
     };
+    // where a rider would sit: the top of the torso over the middle of the barrel (or a part you marked as the seat)
+    info.saddleLocal = null;
+    info.saddleY = size.y * 0.7;
     info.canFly = info.wings.length >= 2 && !legs.length;
     info.biped = !quad && legs.length >= 2 && arms.length >= 2;
+    if (quad && info.spine) {
+      visual.updateMatrixWorld(true);
+      let seatMesh = null;
+      src.traverse((o) => o.isMesh && o.userData && o.userData.role === 'seat' && (seatMesh = o));
+      let sw;
+      if (seatMesh) sw = new THREE.Box3().setFromObject(seatMesh).getCenter(V());
+      else {
+        const bb = new THREE.Box3();
+        for (const ch of info.spine.children) if (ch.isMesh) bb.expandByObject(ch);
+        sw = bb.isEmpty() ? V(0, size.y * 0.7, 0) : V(0, bb.max.y, (bb.min.z + bb.max.z) / 2);
+      }
+      info.saddleLocal = info.spine.worldToLocal(sw.clone());
+      info.saddleY = sw.y;
+    }
     return info;
   }
 
-  function setCharacter(id) {
+  function setCharacter(id, opts = {}) {
     if (!running) return;
     charId = id;
+    const carry = P ? { score: P.score, best: P.best } : null;
     if (P) {
+      if (P.drive) P.drive.v.driver = null;
       clearRide();
+      if (P.gearMesh) scene.remove(P.gearMesh.group);
       scene.remove(P.char.visual);
       world.removeBody(P.body);
       if (held) drop(true);
@@ -457,9 +709,11 @@ export function createPlay(ctx) {
       spawnMine = true;
     }
     const char = buildCharacter(src);
-    ws = clamp(Math.sqrt(char.H / 1.7), 0.5, 1.35);
-    // the world is rebuilt so it fits the size of what you play
-    resetWorldObjects();
+    if (!opts.keepWorld) {
+      ws = clamp(Math.sqrt(char.H / 1.7), 0.5, 1.35);
+      // the world is rebuilt so it fits the size of what you play
+      resetWorldObjects();
+    }
     scene.add(char.visual);
     const r = clamp(0.5 * Math.min(char.W, char.D * 1.6), 0.12, 0.45);
     const body = new CANNON.Body({ mass: 60, material: playerMat, fixedRotation: true, allowSleep: false, linearDamping: 0 });
@@ -486,8 +740,19 @@ export function createPlay(ctx) {
       charge: 0, throwAnim: 0, landT: 0, airT: 0, bounceCool: 0, flap: 0,
       speedH: 0, label: '', who: charId,
       ride: 'walk', rs: null, veh: null, rideRoot: null, skates: null, score: 0, best: 0, groundNormal: UP.clone(),
+      drive: null, rider: null,
+      gear: null, gearMesh: null, gearBs: 1, ammo: {}, swing: null, swingCd: 0, swingStep: 0, swingT: 0, fireCd: 0, reload: 0, recoil: 0, trigLatch: false,
     };
+    if (opts.keepWorld && carry) {
+      P.score = carry.score;
+      P.best = carry.best;
+    }
+    if (opts.at) {
+      P.body.position.set(opts.at.x, Math.max(opts.at.y, r + 0.02) + 0.1, opts.at.z);
+      P.yaw = P.yawTarget = opts.yaw || 0;
+    }
     snapFeet();
+    if (opts.rider) attachRider(opts.rider);
     updateHud();
     if (!spawnMine && !char.legs.length && !char.flatLegs.length && !char.wings.length)
       toast('This model has no leg bones, so it slides around. Name bones like LeftHip, LeftKnee, LeftAnkle to give it walking legs! 🦴');
@@ -499,15 +764,28 @@ export function createPlay(ctx) {
 
   // throw away the playground and build a fresh one (the player stays)
   function resetWorldObjects() {
+    for (const v of vehicles) v.rv && v.rv.removeFromWorld(world);
+    vehicles = [];
+    if (P && P.drive) {
+      P.drive = null;
+      P.body.collisionFilterMask = WORLD;
+      P.char.visual.scale.setScalar(1);
+    }
     for (const b of [...world.bodies]) if (!P || b !== P.body) world.removeBody(b);
     for (const o of [...scene.children]) {
-      if (o === hemi || o === sun || o === sun.target || (P && o === P.char.visual)) continue;
+      if (o === hemi || o === sun || o === sun.target || (P && (o === P.char.visual || o === P.rideRoot || (P.gearMesh && o === P.gearMesh.group) || (P.skates && P.skates.some((k) => k.group === o))))) continue;
       scene.remove(o);
     }
     dyn = [];
     statics = [];
     props = [];
     rails = [];
+    balloons = [];
+    dummies = [];
+    respawns = [];
+    darts = [];
+    fx = [];
+    popups = [];
     held = null;
     ownGeos.splice(0).forEach((g) => g.dispose());
     buildContents();
@@ -710,6 +988,7 @@ export function createPlay(ctx) {
 
     // arms
     armsAnimate(dt, speedH, sw);
+    gearUpdate(dt);
 
     // generic bounce for models with no legs at all
     if (!C.legs.length && !C.flatLegs.length && !C.wings.length) {
@@ -772,6 +1051,7 @@ export function createPlay(ctx) {
   function armsAnimate(dt, speedH, sw) {
     const C = P.char;
     if (!C.arms.length || !C.biped) return;
+    if (gearActive()) return; // gearUpdate handles the arms
     const state = P.state;
     const holdingBoth = held && state !== 'climb';
     const crawl = P.stance === 'crawl' && state === 'ground';
@@ -849,6 +1129,7 @@ export function createPlay(ctx) {
       }
     }
     if (!best) return toast('Nothing close enough to pick up. Walk up to a crate or ball! 📦');
+    if (P.gear) setGear('none');
     held = best;
     best.collisionFilterGroup = HELD;
     best.collisionFilterMask = WORLD;
@@ -859,7 +1140,7 @@ export function createPlay(ctx) {
   function drop(silent) {
     if (!held) return;
     held.collisionFilterGroup = WORLD;
-    held.collisionFilterMask = WORLD | PLAYER | HELD;
+    held.collisionFilterMask = ALL;
     held.angularDamping = 0.2;
     held = null;
     if (!silent) toast('Dropped.');
@@ -875,7 +1156,7 @@ export function createPlay(ctx) {
     b.angularVelocity.set((Math.random() - 0.5) * 8, (Math.random() - 0.5) * 8, (Math.random() - 0.5) * 8);
     b.collisionFilterMask = WORLD; // does not hit the thrower for a moment
     setTimeout(() => {
-      if (b !== held) b.collisionFilterMask = WORLD | PLAYER | HELD;
+      if (b !== held) b.collisionFilterMask = ALL;
     }, 350);
     P.throwAnim = 1;
     P.charge = 0;
@@ -896,9 +1177,10 @@ export function createPlay(ctx) {
     addBall({ r: 0.2 + Math.random() * 0.2, pos: spawnAhead(), color: [0xef476f, 0xffd166, 0x06d6a0, 0x118ab2][Math.floor(Math.random() * 4)] });
   }
   // your model as a rigid, throwable toy
-  function spawnMyModel() {
-    const src = ctx.cloneModel();
-    if (!src.children.length) return toast('Build something first!');
+  // A model (yours, or one loaded from a file) dropped into the playground.
+  // Small ones are toys you can push, pick up and throw. Big ones (houses, ramps) are solid and climbable.
+  function spawnModelProp(src, label) {
+    if (!src.children.length) return toast('Nothing to drop in yet!');
     const wrap = new THREE.Group();
     wrap.add(src);
     src.updateMatrixWorld(true);
@@ -906,7 +1188,10 @@ export function createPlay(ctx) {
     const c = bb.getCenter(V());
     src.position.set(-c.x, -c.y, -c.z);
     wrap.updateMatrixWorld(true);
-    const body = new CANNON.Body({ mass: 6 * ws ** 3, material: propMat });
+    const big = bb.getSize(V());
+    const huge = Math.max(big.x, big.y, big.z) > 6;
+    const mass = huge ? 0 : clamp(big.x * big.y * big.z * 60, 1, 400);
+    const body = new CANNON.Body({ mass, material: huge ? groundMat : propMat });
     const q = new THREE.Quaternion();
     const pos = V();
     const sc = V();
@@ -922,22 +1207,71 @@ export function createPlay(ctx) {
       const centerW = ctr.clone().multiply(sc).applyQuaternion(q).add(pos);
       body.addShape(new CANNON.Box(new CANNON.Vec3(Math.max(0.02, (sz.x * Math.abs(sc.x)) / 2), Math.max(0.02, (sz.y * Math.abs(sc.y)) / 2), Math.max(0.02, (sz.z * Math.abs(sc.z)) / 2))), new CANNON.Vec3(centerW.x, centerW.y, centerW.z), new CANNON.Quaternion(q.x, q.y, q.z, q.w));
     });
-    if (!body.shapes.length) return;
-    const big = bb.getSize(V());
-    const at = spawnAhead(3.5);
-    wrap.scale.setScalar(1);
-    body.position.set(at[0] * ws, at[1] * ws + big.y / 2, at[2] * ws);
+    if (!body.shapes.length) return toast('That model has no shapes to drop in.');
+    const at = spawnAhead(huge ? 6 + big.z / 2 : 3.5);
+    body.position.set(at[0] * ws, huge ? big.y / 2 : at[1] * ws + big.y / 2, at[2] * ws);
     body.collisionFilterGroup = WORLD;
-    body.collisionFilterMask = WORLD | PLAYER | HELD;
-    body.userData = { pickable: true, mesh: wrap, size: Math.max(big.x, big.y, big.z), mass: 6 };
+    body.collisionFilterMask = ALL;
+    body.userData = { pickable: !huge, climb: huge, mesh: wrap, size: Math.max(big.x, big.y, big.z), mass };
     wrap.position.copy(body.position);
     scene.add(wrap);
     world.addBody(body);
-    dyn.push({ body, mesh: wrap });
-    props.push(body);
-    toast('Your model is in the playground! Push it, pick it up (E), throw it! 🧸');
+    if (huge) statics.push(body);
+    else {
+      dyn.push({ body, mesh: wrap });
+      props.push(body);
+    }
+    toast(huge ? `${label} is big, so it is solid. Climb it! 🏠` : `${label} is in the playground! Push it, pick it up (E), throw it! 🧸`);
   }
-
+  const spawnMyModel = () => {
+    const u = ctx.getUse && ctx.getUse();
+    if (u && (u.use === 'shooter' || u.use === 'swing')) {
+      registerMyUse();
+      return setGear('my_mine');
+    }
+    if (u && (u.use === 'car' || u.use === 'hover')) return placeVehicle(ctx.cloneModel(), u.use, u.name || 'Your vehicle');
+    spawnModelProp(ctx.cloneModel(), 'Your model');
+  };
+  function bakeFaceColors(root) {
+    root.traverse((o) => {
+      const fc = o.isMesh && o.userData && o.userData.faceColors;
+      if (!fc || !Object.keys(fc).length || !o.geometry.attributes.face) return;
+      const g = o.geometry;
+      const F = g.attributes.face.array;
+      const base = new THREE.Color(o.userData.color || '#ffffff');
+      const col = new Float32Array(g.attributes.position.count * 3);
+      for (let i = 0; i < F.length; i++) {
+        const hex = fc[F[i]];
+        const k = hex ? new THREE.Color(hex) : base;
+        col.set([k.r, k.g, k.b], i * 3);
+      }
+      g.setAttribute('color', new THREE.BufferAttribute(col, 3));
+      o.material.vertexColors = true;
+      o.material.color.set('#ffffff');
+      o.material.needsUpdate = true;
+    });
+  }
+  // a saved BlockBuddy file (.json) as a prop
+  function addDoc(doc, name = 'Your file') {
+    if (!running || !P) return;
+    if (!doc || doc.app !== 'blockbuddy' || !Array.isArray(doc.nodes)) return toast("That doesn't look like a BlockBuddy file. 🤔");
+    try {
+      const tmp = new THREE.Group();
+      for (const n of doc.nodes) deserialize(n, tmp);
+      tmp.traverse((o) => o.userData && o.userData.id && registry.delete(o.userData.id)); // keep the editor's list clean
+      bakeFaceColors(tmp);
+      const src = cloneClean(tmp);
+      if (doc.use === 'shooter' || doc.use === 'swing') {
+        const id = addCustomGear(src, doc.use, doc.useCfg || {}, doc.name || name);
+        toast(`Added “${doc.name || name}” to your gear! 🌟 Press Q to switch to it.`);
+        setGear(id);
+      } else if (doc.use === 'car' || doc.use === 'hover') placeVehicle(src, doc.use, doc.name || name);
+      else spawnModelProp(src, doc.name || name);
+    } catch (e) {
+      console.error(e);
+      toast("Couldn't load that file: " + e.message);
+    }
+  }
 
   // ------------------------------------------------------------------ riding (skateboard, scooter, roller skates)
   const wrapTo = (a, m) => {
@@ -959,6 +1293,8 @@ export function createPlay(ctx) {
   }
   function setRide(kind) {
     if (!P || (kind !== 'walk' && !RIDES[kind])) return;
+    if (kind !== 'walk' && P.rider) return toast('Get off the animal first. 🐴');
+    if (kind !== 'walk' && P.gear) setGear('none');
     if (held) drop(true);
     clearRide();
     P.state = P.grounded ? 'ground' : 'air'; // also clears a bail from the last ride
@@ -1421,8 +1757,9 @@ export function createPlay(ctx) {
     hud.querySelectorAll('[data-act^="ride:"]').forEach((b) => b.classList.toggle('on', b.dataset.act === 'ride:' + P.ride));
     if (!sc || !cb) return;
     const riding = P.ride !== 'walk' && P.rs;
-    sc.hidden = !riding;
+    sc.hidden = !(riding || P.gear || P.score > 0);
     cb.hidden = !riding;
+    sc.textContent = riding ? `Score ${P.score}  ·  Best combo ${P.best}` : `Score ${P.score}`;
     if (!riding) return;
     sc.textContent = `Score ${P.score}  ·  Best combo ${P.best}`;
     const R = P.rs;
@@ -1431,6 +1768,982 @@ export function createPlay(ctx) {
     else cb.textContent = '';
   }
 
+  // ------------------------------------------------------------------ riding animals
+  // You swap into the animal (it runs, jumps, climbs like it always does) and your old
+  // character appears sitting on its back.
+  function attachRider(riderId) {
+    const C = P.char;
+    if (!C.quad || !C.spine || !C.saddleLocal) return toast("That animal can't carry a rider. 🐾");
+    let src = characterSource(riderId);
+    let R = src ? buildCharacter(src) : null;
+    if (!R || !R.biped) {
+      riderId = 'person';
+      R = buildCharacter(characterSource('person'));
+    }
+    const sc = clamp((C.saddleY * 1.6) / R.H, 0.2, 1.15);
+    R.visual.scale.setScalar(sc);
+    C.spine.add(R.visual); // child of the spine, so the rider rides along with every move
+    const hipsY = R.hips ? R.hips.userData.rest.p.y : R.H * 0.5;
+    R.visual.position.copy(C.saddleLocal).add(V(0, (-hipsY + 0.03) * sc, 0));
+    R.visual.quaternion.identity();
+    seatedPose(R);
+    R.visual.traverse((o) => o.isMesh && (o.castShadow = true));
+    P.rider = { char: R, prevId: riderId, scale: sc };
+    toast('You are riding! The animal does everything it can: run, jump, climb. Use “Get off” to hop down. 🐴');
+  }
+  function mount(kind) {
+    if (!P) return;
+    if (kind === 'mine') {
+      const u = ctx.getUse && ctx.getUse();
+      if (!u || u.use !== 'mount') return toast("Pick 'You can ride it' under 'What can it do?' in the editor first. 🐴");
+    }
+    if (P.drive) exitVehicle();
+    if (P.ride !== 'walk') setRide('walk');
+    if (P.gear) setGear('none');
+    const rider = P.rider ? P.rider.prevId : charId;
+    const at = P.body.position.clone();
+    setCharacter(kind, { keepWorld: true, at, yaw: P.yaw, rider });
+  }
+  function dismount() {
+    if (!P || !P.rider) return toast("You're not riding anything.");
+    const prev = P.rider.prevId;
+    const side = V(Math.cos(P.yaw), 0, -Math.sin(P.yaw)).multiplyScalar(P.char.W * 0.6 + 0.7);
+    const at = V(P.body.position.x + side.x, P.body.position.y, P.body.position.z + side.z);
+    setCharacter(prev, { keepWorld: true, at, yaw: P.yaw });
+  }
+
+  // ------------------------------------------------------------------ vehicles you can drive
+  let vehicles = [];
+  function addBoxShapes(body, root, skip) {
+    const q = new THREE.Quaternion();
+    const pos = V();
+    const sc = V();
+    const pm = new THREE.Matrix4();
+    root.traverse((o) => {
+      if (!o.isMesh || !o.geometry || (skip && skip.has(o))) return;
+      o.geometry.computeBoundingBox();
+      const gb = o.geometry.boundingBox;
+      const sz = gb.getSize(V());
+      const ctr = gb.getCenter(V());
+      o.updateWorldMatrix(true, false);
+      pm.copy(o.matrixWorld).decompose(pos, q, sc);
+      const cw = ctr.clone().multiply(sc).applyQuaternion(q).add(pos);
+      body.addShape(
+        new CANNON.Box(new CANNON.Vec3(Math.max(0.02, (sz.x * Math.abs(sc.x)) / 2), Math.max(0.02, (sz.y * Math.abs(sc.y)) / 2), Math.max(0.02, (sz.z * Math.abs(sc.z)) / 2))),
+        new CANNON.Vec3(cw.x, cw.y, cw.z),
+        new CANNON.Quaternion(q.x, q.y, q.z, q.w),
+      );
+    });
+  }
+  // simple built-in cars: body, cabin, four wheels (front ones steer), a seat spot
+  function carModel({ len = 4, wid = 1.8, hgt = 0.7, color = 0xef476f, wr = 0.38, cab = true }) {
+    const g = new THREE.Group();
+    const add = (geo, c, x, y, z, role) => {
+      const m = new THREE.Mesh(geo, new THREE.MeshStandardMaterial({ color: c, roughness: 0.6 }));
+      m.position.set(x, y, z);
+      m.castShadow = true;
+      if (role) m.userData.role = role;
+      g.add(m);
+      return m;
+    };
+    const bx = (w, h, d) => new THREE.BoxGeometry(w, h, d);
+    const by = wr * 1.15 + hgt / 2;
+    add(bx(wid, hgt, len), color, 0, by, 0);
+    if (cab) {
+      const glass = add(bx(wid * 0.86, hgt * 0.8, len * 0.42), 0xbfe3f5, 0, by + hgt * 0.9, -len * 0.06);
+      glass.material.transparent = true;
+      glass.material.opacity = 0.45;
+    }
+    for (const sx of [1, -1]) add(bx(wid * 0.2, hgt * 0.22, 0.06), 0xfde68a, sx * wid * 0.3, by + hgt * 0.1, len / 2);
+    for (const sx of [1, -1]) add(bx(wid * 0.2, hgt * 0.22, 0.06), 0xef4444, sx * wid * 0.3, by + hgt * 0.1, -len / 2);
+    add(bx(0.04, 0.04, 0.04), 0xffffff, 0, by + (cab ? hgt * 0.62 : hgt * 0.55), -len * 0.05, 'seat').visible = false;
+    const wg = new THREE.CylinderGeometry(wr, wr, wr * 0.7, 18);
+    wg.rotateZ(Math.PI / 2);
+    for (const sx of [1, -1]) for (const sz of [1, -1]) add(wg, 0x1f2937, sx * (wid / 2 + wr * 0.05), wr, sz * len * 0.33, sz > 0 ? 'frontwheel' : 'wheel');
+    return g;
+  }
+  function hoverModel() {
+    const g = new THREE.Group();
+    const add = (geo, c, x, y, z, role) => {
+      const m = new THREE.Mesh(geo, new THREE.MeshStandardMaterial({ color: c, roughness: 0.4, metalness: 0.3 }));
+      m.position.set(x, y, z);
+      m.castShadow = true;
+      if (role) m.userData.role = role;
+      g.add(m);
+      return m;
+    };
+    add(new THREE.BoxGeometry(2.0, 0.5, 3.4), 0x9d4edd, 0, 0.55, 0);
+    add(new THREE.BoxGeometry(1.2, 0.5, 1.5), 0x7dd3fc, 0, 1.0, -0.2);
+    for (const sx of [1, -1]) add(new THREE.CylinderGeometry(0.35, 0.35, 3.0, 12).rotateX(Math.PI / 2), 0xfacc15, sx * 1.15, 0.45, 0);
+    add(new THREE.BoxGeometry(0.04, 0.04, 0.04), 0xffffff, 0, 1.0, -0.2, 'seat').visible = false;
+    return g;
+  }
+  // Turn a model into something you can drive. `src` is a clean clone of the model.
+  function makeVehicle(src, type, label, spawn) {
+    const wrap = new THREE.Group();
+    wrap.add(src);
+    src.updateMatrixWorld(true);
+    let bb = new THREE.Box3().setFromObject(wrap);
+    const c = bb.getCenter(V());
+    src.position.set(-c.x, -c.y, -c.z); // the middle of the car is the origin
+    wrap.updateMatrixWorld(true);
+    bb = new THREE.Box3().setFromObject(wrap);
+    const size = bb.getSize(V());
+    const wheelList = [];
+    let seatMesh = null;
+    src.traverse((o) => {
+      if (!o.isMesh) return;
+      const role = o.userData.role || (/wheel/i.test(o.name) ? (/front/i.test(o.name) ? 'frontwheel' : 'wheel') : null);
+      if (type === 'car' && (role === 'wheel' || role === 'frontwheel')) wheelList.push({ mesh: o, front: role === 'frontwheel' });
+      if (o.userData.role === 'seat') seatMesh = o;
+    });
+    const skip = new Set(wheelList.map((w) => w.mesh));
+    const mass = clamp(size.x * size.y * size.z * 70, 80, 1800);
+    const body = new CANNON.Body({ mass, material: propMat });
+    body.linearDamping = 0.03;
+    body.angularDamping = 0.3;
+    addBoxShapes(body, wrap, skip);
+    if (!body.shapes.length) {
+      toast('That model has no shapes to drive.');
+      return null;
+    }
+    // wheels stick out past the body shapes, so give it the inertia of the whole footprint (or it rolls over)
+    {
+      const w = size.x;
+      const h = size.y;
+      const d = size.z;
+      const I = [(mass / 12) * (h * h + d * d), (mass / 12) * (w * w + d * d), (mass / 12) * (w * w + h * h)];
+      body.inertia.set(I[0], I[1], I[2]);
+      body.invInertia.set(1 / I[0], 1 / I[1], 1 / I[2]);
+      body.invInertiaSolve.copy(body.invInertia);
+      body.updateInertiaWorld(true);
+    }
+    const v = { type, body, wrap, src, label, size, mass, wheels: [], rv: null, steer: 0, driver: null, engSign: -1, steerSign: 1, spinSign: -1, heading: (spawn && spawn[3]) || 0 };
+    let y0 = size.y / 2 + 0.3;
+    if (type === 'car') {
+      if (!wheelList.length)
+        for (const [sx, sz] of [[1, 1], [-1, 1], [1, -1], [-1, -1]]) wheelList.push({ mesh: null, front: sz > 0, center: V(sx * size.x * 0.42, -size.y * 0.5 + size.y * 0.22, sz * size.z * 0.36), radius: clamp(size.y * 0.25, 0.15, 0.7) });
+      v.rv = new CANNON.RaycastVehicle({ chassisBody: body, indexRightAxis: 0, indexUpAxis: 1, indexForwardAxis: 2 });
+      y0 = 0;
+      for (const w of wheelList) {
+        let center = w.center;
+        let radius = w.radius;
+        let baseQ = null;
+        if (w.mesh) {
+          const wb = new THREE.Box3().setFromObject(w.mesh);
+          const wsz = wb.getSize(V());
+          center = wb.getCenter(V());
+          radius = Math.max(wsz.y, wsz.z, 0.05) / 2;
+          src.attach(w.mesh);
+          baseQ = w.mesh.quaternion.clone();
+        }
+        const rest = radius * 0.6;
+        // cannon multiplies the spring force by the car's mass, so this is "per kilogram":
+        // each spring squashes about 40% of its travel under its share of the weight
+        const kS = GRAVITY / (wheelList.length * Math.max(0.04, rest * 0.4));
+        v.rv.addWheel({
+          radius,
+          directionLocal: new CANNON.Vec3(0, -1, 0),
+          suspensionStiffness: kS,
+          suspensionRestLength: rest,
+          frictionSlip: 5,
+          dampingRelaxation: 0.42 * Math.sqrt(kS),
+          dampingCompression: 0.8 * Math.sqrt(kS),
+          maxSuspensionForce: mass * GRAVITY * 3,
+          rollInfluence: 0.01,
+          axleLocal: new CANNON.Vec3(-1, 0, 0),
+          chassisConnectionPointLocal: new CANNON.Vec3(center.x, center.y + rest, center.z),
+          maxSuspensionTravel: radius * 0.7,
+          customSlidingRotationalSpeed: -30,
+          useCustomSlidingRotationalSpeed: true,
+        });
+        v.wheels.push({ mesh: w.mesh, front: w.front, radius, center, baseQ });
+        y0 = Math.max(y0, radius - center.y);
+      }
+      v.rv.addToWorld(world);
+      v.driveIdx = v.wheels.map((w, i) => (w.front ? -1 : i)).filter((i) => i >= 0);
+      if (!v.driveIdx.length) v.driveIdx = v.wheels.map((_, i) => i);
+      v.steerIdx = v.wheels.map((w, i) => (w.front ? i : -1)).filter((i) => i >= 0);
+      v.maxForce = mass * 8;
+      v.brake = mass * 1.1;
+      v.maxSteer = 0.5;
+      body.linearDamping = 0.09;
+    } else {
+      v.hoverH = size.y * 0.5 + 0.55 * ws;
+      y0 = v.hoverH;
+      v.maxSpeed = 14;
+    }
+    v.seat = seatMesh ? new THREE.Box3().setFromObject(seatMesh).getCenter(V()) : V(0, size.y * 0.25, -size.z * 0.05);
+    const at = spawn || [0, 0, 0];
+    const gy = groundYAt(at[0], at[2], 5);
+    body.position.set(at[0], gy + y0 + 0.04, at[2]);
+    body.quaternion.setFromEuler(0, at[3] || 0, 0);
+    body.collisionFilterGroup = WORLD;
+    body.collisionFilterMask = ALL;
+    body.userData = { vehicle: v, size: Math.max(size.x, size.y, size.z), mass };
+    world.addBody(body);
+    wrap.position.copy(body.position);
+    wrap.quaternion.copy(body.quaternion);
+    wrap.traverse((o) => o.isMesh && (o.castShadow = true));
+    scene.add(wrap);
+    vehicles.push(v);
+    return v;
+  }
+  function vehiclesSync() {
+    for (const v of vehicles) {
+      v.wrap.position.copy(v.body.position);
+      v.wrap.quaternion.copy(v.body.quaternion);
+      if (!v.rv) continue;
+      v.wheels.forEach((w, i) => {
+        v.rv.updateWheelTransform(i);
+        if (!w.mesh) return;
+        const info = v.rv.wheelInfos[i];
+        const lp = v.body.pointToLocalFrame(info.worldTransform.position);
+        w.mesh.position.set(lp.x - v.src.position.x, lp.y - v.src.position.y, lp.z - v.src.position.z);
+        const q = new THREE.Quaternion().setFromEuler(new THREE.Euler(info.rotation * (v.spinSign || 1), info.steering, 0, 'YXZ'));
+        if (w.baseQ) q.multiply(w.baseQ);
+        w.mesh.quaternion.copy(q);
+      });
+    }
+  }
+  const vehFwd = (v) => V(0, 0, 1).applyQuaternion(new THREE.Quaternion(v.body.quaternion.x, v.body.quaternion.y, v.body.quaternion.z, v.body.quaternion.w));
+  function nearestVehicle(maxD) {
+    let best = null;
+    let bd = 1e9;
+    for (const v of vehicles) {
+      const d = P.body.position.distanceTo(v.body.position) - v.size.length() * 0.3;
+      if (d < bd && d < maxD) {
+        bd = d;
+        best = v;
+      }
+    }
+    return best;
+  }
+  function enterVehicle(v) {
+    if (v.driver) return toast('Someone is already driving that!');
+    if (held) drop(true);
+    if (P.gear) setGear('none');
+    if (P.ride !== 'walk') setRide('walk');
+    P.drive = { v, scale: 1 };
+    v.driver = P;
+    P.state = 'drive';
+    P.body.collisionFilterMask = 0;
+    P.body.velocity.set(0, 0, 0);
+    camYaw = Math.atan2(vehFwd(v).x, vehFwd(v).z);
+    toast(v.type === 'hover' ? '🛸 W go · A/D turn · Shift boost · Space hop · E get out' : '🚗 W/S gas and reverse · A/D steer · Space brake · Shift boost · U flip upright · E get out');
+  }
+  function exitVehicle() {
+    if (!P || !P.drive) return;
+    const v = P.drive.v;
+    v.driver = null;
+    P.drive = null;
+    P.body.collisionFilterMask = WORLD;
+    const f = vehFwd(v);
+    const left = V(f.z, 0, -f.x);
+    const out = left.multiplyScalar(v.size.x / 2 + P.r + 0.5);
+    P.body.position.set(v.body.position.x + out.x, v.body.position.y + 0.6, v.body.position.z + out.z);
+    P.body.velocity.set(v.body.velocity.x * 0.3, 1, v.body.velocity.z * 0.3);
+    P.yaw = P.yawTarget = Math.atan2(f.x, f.z);
+    P.state = 'air';
+    P.char.visual.scale.setScalar(1);
+    snapFeet();
+    toast('Out you hop! 🚶');
+  }
+  function enterNearVehicle() {
+    if (P.rider) return false;
+    const v = nearestVehicle(2.6 * clamp(ws, 0.7, 1.4));
+    if (!v) return false;
+    enterVehicle(v);
+    return true;
+  }
+  function seatDriver() {
+    const C = P.char;
+    const v = P.drive.v;
+    const q = new THREE.Quaternion(v.body.quaternion.x, v.body.quaternion.y, v.body.quaternion.z, v.body.quaternion.w);
+    const sc = clamp((v.size.y * 1.25) / C.H, 0.25, 1);
+    const up = V(0, 1, 0).applyQuaternion(q);
+    const seatW = v.seat.clone().applyQuaternion(q).add(V(v.body.position.x, v.body.position.y, v.body.position.z));
+    const hipsY = C.hips ? C.hips.userData.rest.p.y : C.H * 0.5;
+    C.visual.scale.setScalar(sc);
+    C.visual.position.copy(seatW).addScaledVector(up, -hipsY * sc);
+    C.visual.quaternion.copy(q);
+    P.body.position.set(seatW.x, seatW.y, seatW.z);
+    P.body.velocity.set(0, 0, 0);
+    seatedPose(C);
+  }
+  // legs bent, hands forward: sitting in a seat or on a saddle
+  function seatedPose(C) {
+    for (const j of C.joints) {
+      j.quaternion.copy(j.userData.rest.q);
+      j.position.copy(j.userData.rest.p);
+    }
+    if (C.biped) {
+      C.legs.forEach((L) => {
+        L.A.rotation.set(-1.3, 0, L.side * 0.2);
+        L.B.rotation.x = 1.4;
+      });
+      C.arms.forEach((L) => {
+        L.A.rotation.set(-1.0, 0, L.side * 0.12);
+        L.B.rotation.x = -0.4;
+      });
+    } else if (C.quad) {
+      C.legs.forEach((L) => {
+        L.A.rotation.x = L.front ? -1.1 : 1.0;
+        L.B.rotation.x = L.front ? 1.2 : -1.2;
+      });
+    }
+    C.visual.updateMatrixWorld(true);
+  }
+  function unflip(v) {
+    const f = vehFwd(v);
+    v.body.quaternion.setFromEuler(0, Math.atan2(f.x, f.z), 0);
+    v.body.position.y += 1.2;
+    v.body.velocity.set(0, 0, 0);
+    v.body.angularVelocity.set(0, 0, 0);
+  }
+
+  // everything that follows the physics step, whether you are walking or driving
+  function afterPhysics(dt) {
+    for (const d of dyn) {
+      d.mesh.position.copy(d.body.position);
+      d.mesh.quaternion.copy(d.body.quaternion);
+    }
+    updateDarts(dt);
+    updateFx(dt);
+    updateTargets(dt);
+    vehiclesSync();
+    for (const d of dyn) if (d.body.position.y < -40) d.body.position.set(0, 3, 4);
+    for (const v of vehicles)
+      if (v.body.position.y < -40) {
+        v.body.position.set(0, 3, 6);
+        v.body.velocity.set(0, 0, 0);
+      }
+  }
+  function driveUpdate(dt) {
+    const v = P.drive.v;
+    const b = v.body;
+    const fi = (key('KeyW') ? 1 : 0) - (key('KeyS') ? 1 : 0);
+    const ri = (key('KeyD') ? 1 : 0) - (key('KeyA') ? 1 : 0);
+    const boost = key('ShiftLeft') || key('ShiftRight');
+    const hand = key('Space');
+    const f = vehFwd(v);
+    const fs = b.velocity.x * f.x + b.velocity.y * f.y + b.velocity.z * f.z; // speed along the way it faces
+    if (once('KeyU')) unflip(v);
+    if (v.type === 'car') {
+      const maxF = v.maxForce * (boost ? 1.8 : 1);
+      const braking = hand || (fi < 0 && fs > 1.5) || (fi > 0 && fs < -1.5);
+      const force = braking ? 0 : fi * maxF * (fi < 0 ? 0.6 : 1);
+      v.rv.wheelInfos.forEach((_, i) => {
+        v.rv.applyEngineForce(v.driveIdx.includes(i) ? (force / v.driveIdx.length) * (v.engSign || 1) : 0, i);
+        v.rv.setBrake(braking ? v.brake : fi === 0 ? v.brake * 0.06 : 0, i);
+      });
+      const target = ((-ri * v.maxSteer) / (1 + Math.abs(fs) / 10)) * (v.steerSign || 1);
+      v.steer = damp(v.steer, target, 9, dt);
+      v.steerIdx.forEach((i) => v.rv.setSteeringValue(v.steer, i));
+    } else {
+      // hovercraft: floats on a cushion, glides, turns on the spot
+      const tx = f.x * fi * v.maxSpeed * (boost ? 1.6 : 1);
+      const tz = f.z * fi * v.maxSpeed * (boost ? 1.6 : 1);
+      const k = Math.min(1, 2.4 * dt);
+      b.velocity.x += (tx - b.velocity.x) * k;
+      b.velocity.z += (tz - b.velocity.z) * k;
+      const gy = groundYAt(b.position.x, b.position.z, b.position.y + 0.5);
+      const want = gy + v.hoverH;
+      b.velocity.y += ((want - b.position.y) * 7 - b.velocity.y) * Math.min(1, 6 * dt);
+      if (once('Space')) b.velocity.y += 7;
+      v.heading += -ri * 2.3 * dt;
+      b.angularVelocity.set(0, 0, 0);
+      b.quaternion.setFromEuler(0, v.heading, 0);
+    }
+    world.step(1 / 60, dt, 4);
+    afterPhysics(dt);
+    seatDriver();
+    updateCamera(dt);
+    updateHud();
+  }
+  function spawnVehicleNear(kind) {
+    let src;
+    let type = 'car';
+    if (kind === 'mine') {
+      const u = ctx.getUse && ctx.getUse();
+      if (!u || (u.use !== 'car' && u.use !== 'hover')) return toast("Pick 'It drives' or 'It hovers' under 'What can it do?' in the editor first. 🚗");
+      src = ctx.cloneModel();
+      type = u.use;
+    } else {
+      src = kind === 'truck' ? carModel({ len: 5.2, wid: 2.2, hgt: 1.15, color: 0x118ab2, wr: 0.55 }) : kind === 'hover' ? hoverModel() : carModel({ len: 2.4, wid: 1.4, hgt: 0.4, color: 0xef476f, wr: 0.3, cab: false });
+      src.scale.setScalar(ws);
+      if (kind === 'hover') type = 'hover';
+    }
+    placeVehicle(src, type, kind, null);
+  }
+  // somewhere in front of you with nothing in the way (so a car does not land on a crate)
+  function freeSpot(size) {
+    const f = camForward();
+    const left = V(f.z, 0, -f.x);
+    const p = P.body.position;
+    const r = size.length() * 0.5 + 0.8;
+    for (let d = 5 * ws; d <= 40 * ws; d += 2.5 * ws)
+      for (const lat of [0, 4 * ws, -4 * ws]) {
+        const x = p.x + f.x * d + left.x * lat;
+        const z = p.z + f.z * d + left.z * lat;
+        let clear = true;
+        for (const b of world.bodies) {
+          if (b === P.body || !b.shapes.length) continue;
+          b.updateAABB();
+          const a = b.aabb;
+          if (a.upperBound.y > 0.3 * ws && a.upperBound.x > x - r && a.lowerBound.x < x + r && a.upperBound.z > z - r && a.lowerBound.z < z + r) {
+            clear = false;
+            break;
+          }
+        }
+        if (clear) return [x, 0, z, Math.atan2(f.x, f.z)];
+      }
+    return [p.x + f.x * 5 * ws, 0, p.z + f.z * 5 * ws, Math.atan2(f.x, f.z)];
+  }
+  function placeVehicle(src, type, label, at) {
+    if (!src.children.length) return toast('Build something first!');
+    if (!at) at = freeSpot(new THREE.Box3().setFromObject(src).getSize(V()));
+    const v = makeVehicle(src, type, label, at);
+    if (v) toast(`Press E next to “${label}” to ${type === 'hover' ? 'fly around' : 'drive'}! 🚗`);
+  }
+  function buildVehicles() {
+    const place = (kind, x, z, yaw) => {
+      const src = kind === 'truck' ? carModel({ len: 5.2, wid: 2.2, hgt: 1.15, color: 0x118ab2, wr: 0.55 }) : kind === 'hover' ? hoverModel() : kind === 'sedan' ? carModel({ len: 4.3, wid: 1.9, hgt: 0.7, color: [0xffd166, 0x06d6a0, 0xef476f, 0x9d4edd][Math.floor(Math.abs(x + z)) % 4], wr: 0.38 }) : carModel({ len: 2.4, wid: 1.4, hgt: 0.4, color: 0xef476f, wr: 0.3, cab: false });
+      src.scale.setScalar(ws);
+      makeVehicle(src, kind === 'hover' ? 'hover' : 'car', kind, [x * ws, 0, z * ws, yaw]);
+    };
+    sign('DRIVE ME! (press E)', [18, 4.5, 3]);
+    place('kart', 12, 7, 0);
+    place('truck', 19, 8, 0);
+    place('hover', 26, 7, 0);
+    place('sedan', 30, 16, Math.PI / 2);
+    // sedans along the city streets
+    for (const [x, z, yaw] of [[-40, 13.5, Math.PI / 2], [-66, -13.5, -Math.PI / 2], [-92, 13.5, Math.PI / 2], [-118, -13.5, -Math.PI / 2], [-40, -13.5, -Math.PI / 2]]) place('sedan', x, z, yaw);
+  }
+
+  // ------------------------------------------------------------------ foam swords and dart guns
+  // your own models marked as shooters or swingables become gear too
+  let customGear = [];
+  const gearDef = (id) => GEAR[id] || (customGear.find((c) => c.id === id) || {}).G || null;
+  const gearIds = () => [...GEAR_ORDER, ...customGear.map((c) => c.id)];
+  const gearOf = () => (P && P.gear ? gearDef(P.gear) : null);
+  function addCustomGear(src, use, cfg = {}, label = 'My gear', slot = null) {
+    const id = 'my_' + (slot || customGear.length + 1);
+    const bb = new THREE.Box3().setFromObject(src);
+    const size = bb.getSize(V());
+    const longest = Math.max(size.x, size.y, size.z, 0.05);
+    const G =
+      use === 'swing'
+        ? { kind: 'melee', reach: clamp(1.2 + longest * 0.7, 1.6, 3.6), swing: 0.34, cool: 0.1, push: clamp(5 + longest * 4, 6, 15) }
+        : { kind: 'gun', rate: cfg.auto ? 0.1 : 0.3, speed: 36, mag: cfg.auto ? 30 : 15, spread: cfg.auto ? 0.035 : 0.01, auto: !!cfg.auto, pellets: 1, proj: cfg.proj || 'dart' };
+    G.label = label;
+    G.icon = '🌟';
+    const entry = { id, use, src, G };
+    const old = customGear.findIndex((c) => c.id === id);
+    if (old >= 0) customGear[old] = entry;
+    else customGear.push(entry);
+    rebuildGearBar();
+    return id;
+  }
+  // the model, turned so its long side points forward, sized for a hand, grip at the origin
+  function buildCustomGear(entry, bs) {
+    const g = new THREE.Group();
+    const holder = new THREE.Group();
+    holder.add(entry.src.clone(true));
+    g.add(holder);
+    holder.updateMatrixWorld(true);
+    let box = new THREE.Box3().setFromObject(holder);
+    const size = box.getSize(V());
+    if (size.x >= size.y && size.x >= size.z) holder.rotation.y = -Math.PI / 2;
+    else if (size.y >= size.x && size.y >= size.z) holder.rotation.x = Math.PI / 2;
+    g.updateMatrixWorld(true);
+    box = new THREE.Box3().setFromObject(holder);
+    const sc = clamp((entry.use === 'swing' ? 0.9 : 0.45) / Math.max(box.max.z - box.min.z, 0.05), 0.2, 3) * bs;
+    holder.scale.setScalar(sc);
+    g.updateMatrixWorld(true);
+    box = new THREE.Box3().setFromObject(holder);
+    const role = (r) => {
+      let found = null;
+      holder.traverse((o) => o.isMesh && o.userData.role === r && (found = o));
+      return found ? new THREE.Box3().setFromObject(found).getCenter(V()) : null;
+    };
+    const mid = box.getCenter(V());
+    const grip = role('grip') || V(mid.x, mid.y, box.min.z + (box.max.z - box.min.z) * 0.12);
+    const muz = (role('muzzle') || V(mid.x, mid.y, box.max.z)).clone().sub(grip);
+    holder.position.sub(grip);
+    const muzzle = new THREE.Object3D();
+    muzzle.position.copy(muz);
+    g.add(muzzle);
+    g.traverse((o) => o.isMesh && (o.castShadow = true));
+    return { group: g, muzzle };
+  }
+  function rebuildGearBar() {
+    const bar = hud && hud.querySelector('#gearBar');
+    if (!bar) return;
+    const items = [['none', '✋', 'Hands'], ...GEAR_ORDER.slice(1).map((id) => [id, GEAR[id].icon, GEAR[id].label]), ...customGear.map((c) => [c.id, '🌟', c.G.label])];
+    bar.innerHTML = items.map(([id, ic, l]) => `<button class="mini" data-act="gear:${id}" title="${l}">${ic} ${l}</button>`).join('') + '<span id="gearAmmo"></span>';
+    updateGearHud();
+  }
+  function registerMyUse() {
+    const u = ctx.getUse && ctx.getUse();
+    customGear = customGear.filter((c) => c.id !== 'my_mine');
+    if (u && (u.use === 'shooter' || u.use === 'swing')) {
+      const src = ctx.cloneModel();
+      if (src.children.length) addCustomGear(src, u.use, u.cfg, u.name || 'My model', 'mine');
+    }
+    rebuildGearBar();
+  }
+  function gearActive() {
+    return !!P.gear && P.ride === 'walk' && !held && (P.state === 'ground' || P.state === 'air') && P.stance !== 'crawl';
+  }
+  function setGear(id) {
+    if (!P) return;
+    if (id !== 'none' && !gearDef(id)) return;
+    if (id !== 'none' && P.ride !== 'walk') return toast('Hop off your ride first (V). 🛹');
+    if (id !== 'none' && P.rider) return toast('Get off the animal first to use gear. 🐴');
+    if (id !== 'none' && held) drop(true);
+    if (P.gearMesh) {
+      scene.remove(P.gearMesh.group);
+      P.gearMesh = null;
+    }
+    P.gear = id === 'none' ? null : id;
+    P.swing = null;
+    if (P.gear) {
+      P.gearBs = clamp(P.char.H / 1.7, 0.45, 1.6);
+      const custom = customGear.find((c) => c.id === P.gear);
+      P.gearMesh = custom ? buildCustomGear(custom, P.gearBs) : buildGear(P.gear, P.gearBs);
+      scene.add(P.gearMesh.group);
+      const G = gearDef(P.gear);
+      if (G.kind === 'gun' && P.ammo[P.gear] == null) P.ammo[P.gear] = G.mag;
+      toast(G.kind === 'melee' ? `${G.icon} ${G.label}! Click to swing. Hit crates, dummies and balloons!` : `${G.icon} ${G.label}! Aim with the camera, click to shoot, Z to reload.`);
+    }
+    updateGearHud();
+  }
+  function cycleGear() {
+    const ids = gearIds();
+    setGear(ids[(ids.indexOf(P.gear || 'none') + 1) % ids.length]);
+  }
+  function reloadGun() {
+    const G = gearOf();
+    if (!G || G.kind !== 'gun' || P.reload > 0 || P.ammo[P.gear] >= G.mag) return;
+    P.reload = 1.1;
+    toast('Reloading… 🔄');
+    updateGearHud();
+  }
+  function attack() {
+    const G = gearOf();
+    if (!G || !gearActive()) return;
+    if (G.kind === 'melee') {
+      if (P.swing || P.swingCd > 0) return;
+      P.swingStep = P.swingT && P.time - P.swingT < 0.9 ? (P.swingStep + 1) % 3 : 0;
+      P.swingT = P.time;
+      P.swing = { t: 0, dur: G.swing, step: P.swingStep, hit: false };
+      P.swingCd = G.swing + G.cool;
+    } else fireGun(G);
+  }
+  function swingPose() {
+    if (!P.swing) return { yawOff: -0.55, pitch: 0.55 };
+    const u = smooth(clamp(P.swing.t / P.swing.dur, 0, 1));
+    if (P.swing.step === 0) return { yawOff: 1.3 - 2.6 * u, pitch: 0.15 };
+    if (P.swing.step === 1) return { yawOff: -1.3 + 2.6 * u, pitch: 0.1 };
+    return { yawOff: 0, pitch: 1.4 - 1.7 * u }; // overhead
+  }
+  function meleeHit() {
+    const G = gearOf();
+    const C = P.char;
+    const center = V(C.visual.position.x, C.visual.position.y + C.H * 0.55, C.visual.position.z);
+    const fwd = fwdOf(P.yaw);
+    const reach = G.reach * clamp(ws, 0.6, 1.3);
+    let n = 0;
+    const inFront = (bp, size) => {
+      const to = V(bp.x - center.x, bp.y - center.y, bp.z - center.z);
+      return to.length() <= reach + size * 0.5 && (to.length() < 0.35 || to.clone().normalize().dot(fwd) > 0.1) ? to : null;
+    };
+    for (const bdy of new Set([...props, ...dummies.map((d) => d.body)])) {
+      const to = inFront(bdy.position, bdy.userData.size || 0.4);
+      if (!to) continue;
+      const dir = to.clone().setY(0);
+      if (dir.lengthSq() < 1e-4) dir.copy(fwd);
+      dir.normalize();
+      const sp = clamp(G.push * (1.3 - 0.06 * Math.min(bdy.mass, 12)), G.push * 0.45, G.push * 1.3);
+      bdy.velocity.set(dir.x * sp, 2.5 + sp * 0.35, dir.z * sp);
+      bdy.angularVelocity.set((Math.random() - 0.5) * 9, (Math.random() - 0.5) * 9, (Math.random() - 0.5) * 9);
+      bdy.wakeUp();
+      burst(bdy.position, 0xffffff, 6);
+      n++;
+    }
+    for (const b of [...balloons]) if (inFront(b.position, b.userData.size)) popBalloon(b);
+    if (n) {
+      P.score += 10 * n;
+      popup(`Whack! +${10 * n}`, V(center.x + fwd.x * 1.2, center.y + 0.6, center.z + fwd.z * 1.2));
+      updateRideHud();
+    }
+  }
+  function muzzleWorld() {
+    const gm = P.gearMesh;
+    if (gm && gm.muzzle) return gm.muzzle.getWorldPosition(V());
+    return V(P.char.visual.position.x, P.char.visual.position.y + P.char.H * 0.8, P.char.visual.position.z);
+  }
+  function aimPoint() {
+    const o = camera.position.clone();
+    const d = camera.getWorldDirection(V());
+    const hit = ray(o, o.clone().addScaledVector(d, 90));
+    return hit ? hit.point : o.clone().addScaledVector(d, 60);
+  }
+  function fireGun(G) {
+    if (P.reload > 0 || P.fireCd > 0) return;
+    if ((P.ammo[P.gear] || 0) <= 0) return reloadGun();
+    P.fireCd = G.rate;
+    P.ammo[P.gear]--;
+    P.recoil = 1;
+    const M = muzzleWorld();
+    const base = aimPoint().sub(M);
+    if (base.length() < 1.0) base.copy(camera.getWorldDirection(V()));
+    base.normalize();
+    for (let i = 0; i < G.pellets; i++) {
+      const d = base.clone().add(V((Math.random() - 0.5) * 2 * G.spread, (Math.random() - 0.5) * 2 * G.spread, (Math.random() - 0.5) * 2 * G.spread)).normalize();
+      spawnDart(M, d.multiplyScalar(G.speed), G.proj || 'dart');
+    }
+    if (P.ammo[P.gear] <= 0) reloadGun();
+    updateGearHud();
+  }
+  const CONFETTI = [0xef476f, 0xffd166, 0x06d6a0, 0x118ab2, 0x9d4edd, 0xfb8500];
+  function spawnDart(pos, vel, kind = 'dart') {
+    const sz = clamp(ws, 0.5, 1.4);
+    const ball = kind === 'ball';
+    const body = new CANNON.Body({ mass: ball ? 0.25 : 0.03, material: ball ? ballMat : propMat });
+    body.addShape(new CANNON.Sphere((ball ? 0.1 : 0.035) * sz));
+    body.position.set(pos.x, pos.y, pos.z);
+    body.velocity.set(vel.x, vel.y, vel.z);
+    body.collisionFilterGroup = DART;
+    body.collisionFilterMask = WORLD;
+    body.linearDamping = 0.02;
+    const col = CONFETTI[Math.floor(Math.random() * CONFETTI.length)];
+    const mesh =
+      kind === 'ball'
+        ? new THREE.Mesh(new THREE.SphereGeometry(0.1 * sz, 12, 8), new THREE.MeshStandardMaterial({ color: col, roughness: 0.4 }))
+        : kind === 'confetti'
+          ? new THREE.Mesh(new THREE.OctahedronGeometry(0.07 * sz), new THREE.MeshBasicMaterial({ color: col }))
+          : buildDart(sz * 1.5);
+    mesh.position.copy(pos);
+    scene.add(mesh);
+    world.addBody(body);
+    const d = { body, mesh, kind, anti: kind === 'ball' ? 0.45 : 0.85, life: 0, stuck: false, done: false, pending: null };
+    body.addEventListener('collide', (e) => onDartHit(d, e));
+    darts.push(d);
+    while (darts.length > 70) removeDart(darts[0]);
+  }
+  function removeDart(d) {
+    world.removeBody(d.body);
+    scene.remove(d.mesh);
+    if (d.kind !== 'dart') {
+      d.mesh.geometry.dispose();
+      d.mesh.material.dispose();
+    }
+    darts.splice(darts.indexOf(d), 1);
+  }
+  function onDartHit(d, e) {
+    if (d.stuck || d.done) return;
+    const o = e.body;
+    const ud = o.userData || {};
+    if (d.kind === 'ball' && !ud.balloon) {
+      // bouncy balls keep bouncing and shove things harder
+      if (ud.bull && !d.scored) {
+        d.scored = true;
+        scoreBull(o, d.body.position);
+      }
+      if (o.mass > 0 && o.type !== CANNON.Body.STATIC) {
+        const dir = d.body.velocity.clone();
+        dir.normalize();
+        const k = 6 / Math.pow(Math.max(o.mass, 1), 0.4);
+        o.velocity.x += dir.x * k;
+        o.velocity.y += dir.y * k + 0.5;
+        o.velocity.z += dir.z * k;
+        o.wakeUp();
+      }
+      return;
+    }
+    d.done = true;
+    if (d.kind === 'confetti' && !ud.balloon) {
+      burst(d.body.position, CONFETTI, 24);
+      d.life = 99;
+      if (ud.bull) scoreBull(o, d.body.position);
+      return;
+    }
+    if (ud.balloon) {
+      d.popTarget = o; // popped after the physics step: you can't remove a body in the middle of one
+      d.life = 99;
+      return;
+    }
+    if (o.mass === 0 || o.type === CANNON.Body.STATIC) {
+      d.pending = { stick: true, other: o };
+      if (ud.bull) scoreBull(o, d.body.position);
+    } else {
+      const dir = d.body.velocity.clone();
+      dir.normalize();
+      o.velocity.x += dir.x * 1.8;
+      o.velocity.y += dir.y * 1.8 + 0.4;
+      o.velocity.z += dir.z * 1.8;
+      o.wakeUp();
+      burst(d.body.position, 0xf97316, 3);
+    }
+  }
+  function scoreBull(o, hitPos) {
+    const lp = o.pointToLocalFrame(new CANNON.Vec3(hitPos.x, hitPos.y, hitPos.z));
+    const r = Math.hypot(lp.x, lp.y) / (o.userData.size * 0.5);
+    const [pts, name] = r < 0.14 ? [100, 'Bullseye!'] : r < 0.4 ? [50, 'Great!'] : r < 0.7 ? [25, 'Nice!'] : [10, 'Hit'];
+    P.score += pts;
+    popup(`${name} +${pts}`, V(hitPos.x, hitPos.y + 0.5, hitPos.z + 0.3));
+    updateRideHud();
+  }
+  function popBalloon(b) {
+    if (!balloons.includes(b)) return;
+    const u = b.userData;
+    burst(b.position, u.color, 14);
+    scene.remove(u.mesh);
+    world.removeBody(b);
+    balloons.splice(balloons.indexOf(b), 1);
+    P.score += 50;
+    popup('Pop! +50', V(b.position.x, b.position.y + 0.4, b.position.z));
+    respawns.push({ t: 9, fn: () => addBalloon(u.pos, u.color) });
+    updateRideHud();
+  }
+  function burst(at, color, n) {
+    for (let i = 0; i < n; i++) {
+      const sz = 0.07 * clamp(ws, 0.5, 1.3);
+      const m = new THREE.Mesh(new THREE.BoxGeometry(sz, sz, sz), new THREE.MeshBasicMaterial({ color: Array.isArray(color) ? color[i % color.length] : i % 2 ? color : 0xffffff }));
+      m.position.set(at.x, at.y, at.z);
+      scene.add(m);
+      fx.push({ m, v: V((Math.random() - 0.5) * 5, Math.random() * 4 + 1, (Math.random() - 0.5) * 5), t: 0 });
+    }
+  }
+  function popup(text, at) {
+    const cv = document.createElement('canvas');
+    cv.width = 320;
+    cv.height = 80;
+    const c = cv.getContext('2d');
+    c.font = 'bold 46px system-ui, sans-serif';
+    c.textAlign = 'center';
+    c.textBaseline = 'middle';
+    c.lineWidth = 8;
+    c.strokeStyle = '#4c2fbf';
+    c.strokeText(text, 160, 42);
+    c.fillStyle = '#fff';
+    c.fillText(text, 160, 42);
+    const tex = new THREE.CanvasTexture(cv);
+    tex.colorSpace = THREE.SRGBColorSpace;
+    const sp = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, depthWrite: false, depthTest: false }));
+    sp.scale.set(2.2 * clamp(ws, 0.6, 1.3), 0.55 * clamp(ws, 0.6, 1.3), 1);
+    sp.position.set(at.x, at.y, at.z);
+    sp.renderOrder = 50;
+    scene.add(sp);
+    popups.push({ sp, t: 0 });
+  }
+  function updateDarts(dt) {
+    const Z = V(0, 0, 1);
+    for (const d of [...darts]) {
+      d.life += dt;
+      if (d.popTarget) {
+        if (balloons.includes(d.popTarget)) popBalloon(d.popTarget);
+        d.popTarget = null;
+      }
+      if (d.pending && d.pending.stick) {
+        d.body.velocity.set(0, 0, 0);
+        d.body.type = CANNON.Body.STATIC;
+        d.body.mass = 0;
+        d.body.updateMassProperties();
+        d.body.collisionFilterMask = 0;
+        d.stuck = true;
+        d.life = 0;
+        d.pending = null;
+      }
+      if (!d.stuck) {
+        const v = d.body.velocity;
+        if (d.kind === 'dart' && v.length() > 0.6) d.mesh.quaternion.setFromUnitVectors(Z, V(v.x, v.y, v.z).normalize());
+        else if (d.kind !== 'dart') d.mesh.quaternion.set(d.body.quaternion.x, d.body.quaternion.y, d.body.quaternion.z, d.body.quaternion.w);
+        d.mesh.position.copy(d.body.position);
+      }
+      if ((d.stuck && d.life > 25) || (d.done && !d.stuck && d.life > 4) || (!d.done && d.life > (d.kind === 'ball' ? 8 : 6))) removeDart(d);
+    }
+  }
+  function updateFx(dt) {
+    for (const f of [...fx]) {
+      f.t += dt;
+      f.v.y -= GRAVITY * 0.6 * dt;
+      f.m.position.addScaledVector(f.v, dt);
+      f.m.scale.setScalar(Math.max(0.01, 1 - f.t / 0.9));
+      if (f.t > 0.9) {
+        scene.remove(f.m);
+        fx.splice(fx.indexOf(f), 1);
+      }
+    }
+    for (const pp of [...popups]) {
+      pp.t += dt;
+      pp.sp.position.y += dt * 1.1;
+      pp.sp.material.opacity = clamp(2 - pp.t * 1.1, 0, 1);
+      if (pp.t > 1.8) {
+        scene.remove(pp.sp);
+        popups.splice(popups.indexOf(pp), 1);
+      }
+    }
+  }
+  // balloons bob, knocked-over dummies stand back up, popped balloons come back
+  function updateTargets(dt) {
+    for (const b of balloons) b.userData.mesh.position.y = b.userData.home.y + Math.sin(P.time * 1.6 + b.userData.phase) * 0.12 * ws;
+    for (const d of dummies) {
+      const up = V(0, 1, 0).applyQuaternion(new THREE.Quaternion(d.body.quaternion.x, d.body.quaternion.y, d.body.quaternion.z, d.body.quaternion.w)).y;
+      if (!d.scored && up < 0.55) {
+        d.scored = true;
+        d.downT = 0;
+        P.score += 25;
+        popup('Knocked over! +25', V(d.body.position.x, d.body.position.y + 1, d.body.position.z));
+        updateRideHud();
+      }
+      if (d.scored) {
+        d.downT += dt;
+        if (d.downT > 6) {
+          d.body.position.copy(d.home.p);
+          d.body.quaternion.copy(d.home.q);
+          d.body.velocity.set(0, 0, 0);
+          d.body.angularVelocity.set(0, 0, 0);
+          d.scored = false;
+        }
+      }
+    }
+    for (const r of [...respawns]) {
+      r.t -= dt;
+      if (r.t <= 0) {
+        r.fn();
+        respawns.splice(respawns.indexOf(r), 1);
+      }
+    }
+  }
+  function gearTick(dt) {
+    P.fireCd = Math.max(0, P.fireCd - dt);
+    P.swingCd = Math.max(0, P.swingCd - dt);
+    if (P.reload > 0) {
+      P.reload -= dt;
+      if (P.reload <= 0) {
+        P.reload = 0;
+        if (gearOf() && gearOf().kind === 'gun') P.ammo[P.gear] = gearOf().mag;
+        updateGearHud();
+      }
+    }
+    if (P.swing) {
+      P.swing.t += dt;
+      const u = P.swing.t / P.swing.dur;
+      if (!P.swing.hit && u >= 0.45) {
+        P.swing.hit = true;
+        meleeHit();
+      }
+      if (u >= 1) P.swing = null;
+    }
+    const G = gearOf();
+    const trig = mouseDown || key('KeyF');
+    if (G && gearActive() && trig && (!P.trigLatch || G.auto)) attack();
+    P.trigLatch = trig;
+  }
+
+  // where the gear is and what the arms do with it
+  const quatFacing = (dir) => {
+    const z = dir.clone().normalize();
+    const x = UP.clone().cross(z);
+    if (x.lengthSq() < 1e-6) x.set(1, 0, 0);
+    x.normalize();
+    const y = z.clone().cross(x);
+    return new THREE.Quaternion().setFromRotationMatrix(new THREE.Matrix4().makeBasis(x, y, z));
+  };
+  const endOf = (L) => (L.C ? L.C.getWorldPosition(V()) : L.B.localToWorld(L.endLocal.clone()));
+  function gearUpdate(dt) {
+    const gm = P.gearMesh;
+    if (!gm) return;
+    const act = gearActive();
+    gm.group.visible = act;
+    if (!act) return;
+    const C = P.char;
+    const G = gearDef(P.gear);
+    P.recoil = Math.max(0, P.recoil - dt * 7);
+    const bs = P.gearBs;
+    const fwd = fwdOf(P.yaw);
+    const left = leftOf(P.yaw);
+    const aim = G.kind === 'gun' ? camera.getWorldDirection(V()) : fwd.clone();
+    if (G.kind === 'gun') {
+      aim.y = clamp(aim.y, -0.6, 0.7);
+      aim.normalize();
+    }
+    let dir = aim;
+    let at = null;
+    const sw = swingPose();
+    const fy = V(Math.sin(P.yaw + sw.yawOff), 0, Math.cos(P.yaw + sw.yawOff));
+    const bladeDir = fy.clone().multiplyScalar(Math.cos(sw.pitch)).addScaledVector(UP, Math.sin(sw.pitch)).normalize();
+    if (G.kind === 'melee') dir = bladeDir;
+    if (C.biped) {
+      const Rt = C.arms.find((L) => L.side < 0);
+      const Lf = C.arms.find((L) => L.side > 0);
+      const sh = Rt.A.getWorldPosition(V());
+      const armLen = Rt.l1 + Rt.l2;
+      const handT =
+        G.kind === 'gun'
+          ? sh.clone().addScaledVector(aim, armLen * 0.85).addScaledVector(UP, -0.04 * C.H).addScaledVector(left, 0.05)
+          : sh.clone().addScaledVector(fy, armLen * 0.7).addScaledVector(UP, -armLen * 0.25 + Math.sin(sw.pitch) * armLen * 0.3);
+      solveLimb(Rt, handT, V().addScaledVector(left, -0.5).addScaledVector(UP, -0.5).addScaledVector(fwd, -0.3), null);
+      at = endOf(Rt);
+      if (G.kind === 'gun') {
+        const grip = at.clone().addScaledVector(aim, 0.2 * bs);
+        solveLimb(Lf, grip, V().addScaledVector(left, 0.5).addScaledVector(UP, -0.5).addScaledVector(fwd, -0.3), null);
+      } else {
+        Lf.A.rotation.z = 0.45;
+        Lf.A.rotation.x = -0.3;
+        Lf.B.rotation.x = -0.5;
+      }
+    } else {
+      const base = C.head ? C.head.getWorldPosition(V()) : C.visual.position.clone().add(V(0, C.H * 0.8, 0));
+      if (G.kind === 'melee') {
+        if (C.head) C.head.rotation.y = sw.yawOff * 0.6;
+        at = base.clone().addScaledVector(fwd, 0.2 * C.D).addScaledVector(UP, -0.03 * C.H);
+      } else {
+        at = C.visual.position.clone().add(V(0, C.H * 1.0, 0)).addScaledVector(fwd, -0.05 * C.D);
+      }
+    }
+    at.addScaledVector(dir, -0.05 * bs * P.recoil);
+    gm.group.position.copy(at);
+    gm.group.quaternion.copy(quatFacing(dir));
+    gm.group.updateMatrixWorld(true);
+  }
+  function updateGearHud() {
+    if (!hud || !P) return;
+    hud.querySelectorAll('[data-act^="gear:"]').forEach((b) => b.classList.toggle('on', b.dataset.act === 'gear:' + (P.gear || 'none')));
+    const G = gearOf();
+    const am = hud.querySelector('#gearAmmo');
+    if (am) am.textContent = G && G.kind === 'gun' ? (P.reload > 0 ? 'Reloading…' : `${P.ammo[P.gear]} / ${G.mag} darts`) : '';
+    const cross = hud.querySelector('#cross');
+    if (cross) cross.hidden = !(G && G.kind === 'gun');
+  }
+
+  // ---- zones
+  const ZONES = { start: { x: 0, z: 0, yaw: 0, name: 'the start' }, skate: { x: 38, z: 3, yaw: 0, name: 'the skate park 🛹' }, city: { x: -33, z: 0, yaw: -Math.PI / 2, name: 'the city 🏙️' }, range: { x: 20, z: -20, yaw: Math.PI, name: 'the target range 🎯' } };
+  const ZONE_ORDER = ['start', 'skate', 'city', 'range'];
+  let zoneIdx = 0;
+  function goZone(id) {
+    const z = ZONES[id];
+    if (!z || !P) return;
+    if (P.drive) exitVehicle();
+    zoneIdx = ZONE_ORDER.indexOf(id);
+    P.body.position.set(z.x * ws, P.r + 0.6, z.z * ws);
+    P.body.velocity.set(0, 0, 0);
+    camYaw = z.yaw;
+    P.yaw = P.yawTarget = z.yaw;
+    if (P.rs) {
+      P.rs.heading = z.yaw;
+      P.rs.speed = 0;
+    }
+    P.state = 'air';
+    snapFeet();
+    toast(`Zooming to ${z.name}`);
+  }
+  const cycleZone = () => goZone(ZONE_ORDER[(zoneIdx + 1) % ZONE_ORDER.length]);
+
+
   // ------------------------------------------------------------------ controls
   const key = (c) => keys.has(c);
   const once = (c) => pressedOnce.delete(c);
@@ -1438,6 +2751,7 @@ export function createPlay(ctx) {
     if (!P) return;
     const b = P.body;
     if (P.antiGrav > 0) b.force.y += GRAVITY * b.mass * P.antiGrav;
+    for (const d of darts) if (!d.stuck) d.body.force.y += GRAVITY * d.body.mass * d.anti;
     if (held) {
       const hp = holdPoint();
       held.velocity.set((hp.x - held.position.x) * 16, (hp.y - held.position.y) * 16, (hp.z - held.position.z) * 16);
@@ -1483,8 +2797,17 @@ export function createPlay(ctx) {
     if (key('ArrowUp')) camPitch = clamp(camPitch - 1.2 * dt, -0.4, 1.2);
     if (key('ArrowDown')) camPitch = clamp(camPitch + 1.2 * dt, -0.4, 1.2);
     if (once('Space')) P.jumpBuf = 0.14;
-    if (once('KeyE')) tryPickUp();
-    if (once('KeyF')) held ? throwHeld() : tryPickUp();
+    if (once('KeyE')) {
+      if (P.drive) exitVehicle();
+      else if (!enterNearVehicle()) tryPickUp();
+    }
+    if (once('KeyF')) {
+      if (held) throwHeld();
+      else if (!P.gear) tryPickUp();
+    }
+    if (once('KeyQ')) cycleGear();
+    if (once('KeyZ')) reloadGun();
+    if (once('KeyY')) cycleZone();
     if (once('KeyV')) cycleRide();
     if (once('KeyH') && hud) {
       const h = hud.querySelector('#playHelp');
@@ -1502,11 +2825,8 @@ export function createPlay(ctx) {
       snapFeet();
       toast('Fresh playground! 🔄');
     }
-    if (once('KeyT')) {
-      P.body.position.set(0, P.r + 0.5, 0);
-      P.body.velocity.set(0, 0, 0);
-      P.state = 'air';
-    }
+    if (once('KeyT')) goZone('start');
+    gearTick(dt);
     if (held && mouseDown) P.charge += dt;
     if (!mouseDown && P.charge > 0 && held) throwHeld();
     if (!held && !mouseDown) P.charge = Math.max(0, P.charge - dt * 3);
@@ -1520,6 +2840,8 @@ export function createPlay(ctx) {
     if (mv.lengthSq() > 1) mv.normalize();
     const running_ = key('ShiftLeft') || key('ShiftRight');
     const bodyFwd = fwdOf(P.yaw);
+
+    if (P.drive) return driveUpdate(dt);
 
     // ---- stance: stand / crouch / crawl, with a headroom check
     let want = P.ride !== 'walk' ? 'stand' : P.crawlToggle ? 'crawl' : key('KeyC') || key('ControlLeft') ? 'crouch' : 'stand';
@@ -1645,7 +2967,7 @@ export function createPlay(ctx) {
       const upI = (key('KeyW') ? 1 : 0) - (key('KeyS') ? 1 : 0);
       const sideI = (key('KeyD') ? 1 : 0) - (key('KeyA') ? 1 : 0);
       const Tr = V().crossVectors(UP, N); // player's right on the wall
-      const sp = 2.1 * P.k;
+      const sp = 2.8 * P.k;
       const vel = UP.clone().multiplyScalar(upI * sp).addScaledVector(Tr, sideI * sp * 0.8);
       if (hitC) {
         const dist = V(b.position.x - hitC.point.x, 0, b.position.z - hitC.point.z).dot(N);
@@ -1769,7 +3091,7 @@ export function createPlay(ctx) {
       const k = Math.min(1, accel * dt);
       v.x += (tx - v.x) * k;
       v.z += (tz - v.z) * k;
-      if (held) P.yawTarget = camYaw;
+      if (held || gearActive()) P.yawTarget = camYaw;
       else if (mv.lengthSq() > 0.01) P.yawTarget = Math.atan2(mv.x, mv.z);
       // jump (double jump too)
       const canGroundJump = P.grounded || P.coyote > 0;
@@ -1798,7 +3120,7 @@ export function createPlay(ctx) {
       } else P.flap = Math.max(0, P.flap - dt);
       // bounce pads
       if (P.grounded && P.groundBody && P.groundBody.userData && P.groundBody.userData.bounce && P.bounceCool <= 0) {
-        v.y = P.jumpV * 2.1;
+        v.y = P.jumpV * (P.groundBody.userData.launch ? 3.1 : 2.1);
         P.bounceCool = 0.3;
         P.grounded = false;
         P.jumps = 1;
@@ -1813,16 +3135,12 @@ export function createPlay(ctx) {
 
     // ---- physics
     world.step(1 / 60, dt, 4);
-    for (const d of dyn) {
-      d.mesh.position.copy(d.body.position);
-      d.mesh.quaternion.copy(d.body.quaternion);
-    }
+    afterPhysics(dt);
     // a fell-off-the-world safety net
     if (b.position.y < -30) {
       b.position.set(0, P.r + 1, 0);
       b.velocity.set(0, 0, 0);
     }
-    for (const d of dyn) if (d.body.position.y < -40) d.body.position.set(0, 3, 4);
     if (held && !P.char.visual) drop(true);
 
     animate(dt);
@@ -1833,10 +3151,18 @@ export function createPlay(ctx) {
   // ------------------------------------------------------------------ camera and HUD
   let camPos = V(0, 3, -5);
   function updateCamera(dt) {
-    const p = P.char.visual.position;
-    const H = P.char.H;
-    const target = V(p.x, p.y + H * 0.8, p.z);
-    const dist = clamp(H * 2.3 + 1.0, 2.0, 7) * camZoom;
+    let p = P.char.visual.position;
+    let H = P.char.H;
+    let target = V(p.x, p.y + H * 0.8, p.z);
+    let dist = clamp(H * 2.3 + 1.0, 2.0, 7) * camZoom;
+    if (P.drive) {
+      const v = P.drive.v;
+      p = v.body.position;
+      target = V(p.x, p.y + v.size.y * 0.7, p.z);
+      dist = clamp(v.size.length() * 0.9 + 2.5, 4, 14) * camZoom;
+      const fv = vehFwd(v);
+      if (Math.hypot(v.body.velocity.x, v.body.velocity.z) > 1.5 && !key('ArrowLeft') && !key('ArrowRight')) camYaw += angleDiff(Math.atan2(fv.x, fv.z), camYaw) * (1 - Math.exp(-2.2 * dt));
+    }
     const off = V(-Math.sin(camYaw) * Math.cos(camPitch), Math.sin(camPitch), -Math.cos(camYaw) * Math.cos(camPitch)).multiplyScalar(dist);
     const want = target.clone().add(off);
     // do not push the camera through walls
@@ -1850,7 +3176,7 @@ export function createPlay(ctx) {
     sun.target.position.set(p.x, 0, p.z);
     sun.target.updateMatrixWorld();
   }
-  const STATE_NAMES = { grind: 'Grinding 🔩', bail: 'Bail! 😵', ground: 'On the ground', air: 'In the air', climb: 'Climbing 🧗', wallrun: 'Wall run 🏃', wallup: 'Wall run up 🧗‍♂️', mantle: 'Pulling up…' };
+  const STATE_NAMES = { drive: 'Driving 🚗', grind: 'Grinding 🔩', bail: 'Bail! 😵', ground: 'On the ground', air: 'In the air', climb: 'Climbing 🧗', wallrun: 'Wall run 🏃', wallup: 'Wall run up 🧗‍♂️', mantle: 'Pulling up…' };
   function updateHud() {
     if (!hud || !P) return;
     const el = hud.querySelector('#playState');
@@ -1858,6 +3184,11 @@ export function createPlay(ctx) {
     let t = STATE_NAMES[P.state] || P.state;
     if (P.ride !== 'walk' && P.state === 'ground') t = P.speedH > 0.4 ? `${RIDES[P.ride].icon} Rolling` : `${RIDES[P.ride].icon} Ready`;
     else if (P.state === 'ground') t = P.stance === 'crawl' ? 'Crawling 🐛' : P.stance === 'crouch' ? 'Crouching' : P.speedH > P.walk * 1.3 ? 'Running 💨' : P.speedH > 0.4 ? 'Walking' : 'Standing';
+    if (P.drive) {
+      const bv = P.drive.v.body.velocity;
+      t = `${P.drive.v.type === 'hover' ? '🛸 Hovering' : '🚗 Driving'} · ${Math.round(Math.hypot(bv.x, bv.y, bv.z) * 3.6)} km/h · E to get out`;
+    } else if (P.ride === 'walk' && nearestVehicle(2.6 * clamp(ws, 0.7, 1.4))) t += ' · E to drive 🚗';
+    if (P.rider) t += ' · riding 🐴';
     if (held) t += ' · holding something';
     updateRideHud();
     if (P.charge > 0 && held) t += ` · throw power ${'▮'.repeat(Math.min(8, Math.ceil((P.charge / 1.2) * 8)))}`;
@@ -1891,7 +3222,7 @@ export function createPlay(ctx) {
     }
     if (e.button === 0) {
       mouseDown = true;
-      if (!held) tryPickUp();
+      if (!held && !P.gear) tryPickUp();
     }
   };
   const onMouseUp = (e) => {
@@ -1927,6 +3258,7 @@ export function createPlay(ctx) {
     window.addEventListener('wheel', onWheel, { passive: true });
     window.addEventListener('blur', onBlur);
     setCharacter(opts.character || 'mine');
+    registerMyUse();
     camPos.set(0, 3, -5);
     last = performance.now();
     resize();
@@ -1945,7 +3277,8 @@ export function createPlay(ctx) {
     renderer.shadowMap.enabled = false;
     scene.traverse((o) => {
       if (o.isMesh || o.isSprite) {
-        if (o.material) (o.material.map && o.material.map.dispose(), o.material.dispose());
+        // some meshes (the city buildings) have a list of materials
+        for (const m of Array.isArray(o.material) ? o.material : [o.material]) if (m) (m.map && m.map.dispose(), m.dispose());
       }
     });
     ownGeos.splice(0).forEach((g) => g.dispose());
@@ -1953,6 +3286,7 @@ export function createPlay(ctx) {
     world = null;
     P = null;
     held = null;
+    customGear = [];
     dyn = [];
     props = [];
     statics = [];
@@ -1976,7 +3310,7 @@ export function createPlay(ctx) {
     for (let i = 0; i < n; i++) update(dt);
   }
   return {
-    start, stop, frame, resize, setCharacter, setRide, tick,
+    start, stop, frame, resize, setCharacter, setRide, setGear, goZone, addDoc, registerMyUse, spawnVehicleNear, mount, dismount, tick,
     get running() { return running; },
     get character() { return charId; },
     debug: {
@@ -1986,6 +3320,13 @@ export function createPlay(ctx) {
       get props() { return props; },
       get held() { return held; },
       get ws() { return ws; },
+      get vehicles() { return vehicles; },
+      enterVehicle,
+      exitVehicle,
+      spawnDart,
+      get balloons() { return balloons; },
+      get dummies() { return dummies; },
+      get darts() { return darts; },
       get rails() { return rails; },
       get camYaw() { return camYaw; },
       set camYaw(v) { camYaw = v; },
