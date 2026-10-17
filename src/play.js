@@ -1808,17 +1808,20 @@ export function createPlay(ctx) {
     }
     if (P.drive) exitVehicle();
     if (P.ride !== 'walk') setRide('walk');
-    if (P.gear) setGear('none');
+    const keepGear = P.gear;
     const rider = P.rider ? P.rider.prevId : charId;
     const at = P.body.position.clone();
     setCharacter(kind, { keepWorld: true, at, yaw: P.yaw, rider });
+    if (keepGear) setGear(keepGear);
   }
   function dismount() {
     if (!P || !P.rider) return toast("You're not riding anything.");
     const prev = P.rider.prevId;
+    const keepGear = P.gear;
     const side = V(Math.cos(P.yaw), 0, -Math.sin(P.yaw)).multiplyScalar(P.char.W * 0.6 + 0.7);
     const at = V(P.body.position.x + side.x, P.body.position.y, P.body.position.z + side.z);
     setCharacter(prev, { keepWorld: true, at, yaw: P.yaw });
+    if (keepGear) setGear(keepGear);
   }
 
   // ------------------------------------------------------------------ vehicles you can drive
@@ -2031,7 +2034,6 @@ export function createPlay(ctx) {
   function enterVehicle(v) {
     if (v.driver) return toast('Someone is already driving that!');
     if (held) drop(true);
-    if (P.gear) setGear('none');
     if (P.ride !== 'walk') setRide('walk');
     P.drive = { v, scale: 1 };
     v.driver = P;
@@ -2078,6 +2080,8 @@ export function createPlay(ctx) {
     C.visual.quaternion.copy(q);
     P.body.position.set(seatW.x, seatW.y, seatW.z);
     P.body.velocity.set(0, 0, 0);
+    const hf = V(0, 0, 1).applyQuaternion(q);
+    P.yaw = P.yawTarget = Math.atan2(hf.x, hf.z);
     seatedPose(C);
   }
   // legs bent, hands forward: sitting in a seat or on a saddle
@@ -2167,6 +2171,7 @@ export function createPlay(ctx) {
     world.step(1 / 60, dt, 4);
     afterPhysics(dt);
     seatDriver();
+    gearUpdate(dt);
     updateCamera(dt);
     updateHud();
   }
@@ -2302,23 +2307,25 @@ export function createPlay(ctx) {
     }
     rebuildGearBar();
   }
+  // who holds the gear: you, or your old character sitting on the animal
+  const wielder = () => (P.rider ? P.rider.char : P.char);
   function gearActive() {
-    return !!P.gear && P.ride === 'walk' && !held && (P.state === 'ground' || P.state === 'air') && P.stance !== 'crawl';
+    return !!P.gear && P.ride === 'walk' && !held && (P.state === 'ground' || P.state === 'air' || P.state === 'drive') && P.stance !== 'crawl';
   }
   function setGear(id) {
     if (!P) return;
     if (id !== 'none' && !gearDef(id)) return;
     if (id !== 'none' && P.ride !== 'walk') return toast('Hop off your ride first (V). 🛹');
-    if (id !== 'none' && P.rider) return toast('Get off the animal first to use gear. 🐴');
     if (id !== 'none' && held) drop(true);
     if (P.gearMesh) {
       scene.remove(P.gearMesh.group);
       P.gearMesh = null;
     }
+    if (id === 'none' && P.rider) seatedPose(P.rider.char);
     P.gear = id === 'none' ? null : id;
     P.swing = null;
     if (P.gear) {
-      P.gearBs = clamp(P.char.H / 1.7, 0.45, 1.6);
+      P.gearBs = clamp(wielder().H / 1.7, 0.45, 1.6);
       const custom = customGear.find((c) => c.id === P.gear);
       P.gearMesh = custom ? buildCustomGear(custom, P.gearBs) : buildGear(P.gear, P.gearBs);
       scene.add(P.gearMesh.group);
@@ -2669,10 +2676,12 @@ export function createPlay(ctx) {
     const act = gearActive();
     gm.group.visible = act;
     if (!act) return;
-    const C = P.char;
+    const C = wielder();
     const G = gearDef(P.gear);
+    const sc = C.visual.getWorldScale(V()).x;
+    gm.group.scale.setScalar(sc);
     P.recoil = Math.max(0, P.recoil - dt * 7);
-    const bs = P.gearBs;
+    const bs = P.gearBs * sc;
     const fwd = fwdOf(P.yaw);
     const left = leftOf(P.yaw);
     const aim = G.kind === 'gun' ? camera.getWorldDirection(V()) : fwd.clone();
@@ -2690,10 +2699,10 @@ export function createPlay(ctx) {
       const Rt = C.arms.find((L) => L.side < 0);
       const Lf = C.arms.find((L) => L.side > 0);
       const sh = Rt.A.getWorldPosition(V());
-      const armLen = Rt.l1 + Rt.l2;
+      const armLen = (Rt.l1 + Rt.l2) * sc;
       const handT =
         G.kind === 'gun'
-          ? sh.clone().addScaledVector(aim, armLen * 0.85).addScaledVector(UP, -0.04 * C.H).addScaledVector(left, 0.05)
+          ? sh.clone().addScaledVector(aim, armLen * 0.85).addScaledVector(UP, -0.04 * C.H * sc).addScaledVector(left, 0.05)
           : sh.clone().addScaledVector(fy, armLen * 0.7).addScaledVector(UP, -armLen * 0.25 + Math.sin(sw.pitch) * armLen * 0.3);
       solveLimb(Rt, handT, V().addScaledVector(left, -0.5).addScaledVector(UP, -0.5).addScaledVector(fwd, -0.3), null);
       at = endOf(Rt);
@@ -2706,12 +2715,12 @@ export function createPlay(ctx) {
         Lf.B.rotation.x = -0.5;
       }
     } else {
-      const base = C.head ? C.head.getWorldPosition(V()) : C.visual.position.clone().add(V(0, C.H * 0.8, 0));
+      const base = C.head ? C.head.getWorldPosition(V()) : C.visual.getWorldPosition(V()).add(V(0, C.H * 0.8 * sc, 0));
       if (G.kind === 'melee') {
         if (C.head) C.head.rotation.y = sw.yawOff * 0.6;
-        at = base.clone().addScaledVector(fwd, 0.2 * C.D).addScaledVector(UP, -0.03 * C.H);
+        at = base.clone().addScaledVector(fwd, 0.2 * C.D * sc).addScaledVector(UP, -0.03 * C.H * sc);
       } else {
-        at = C.visual.position.clone().add(V(0, C.H * 1.0, 0)).addScaledVector(fwd, -0.05 * C.D);
+        at = C.visual.getWorldPosition(V()).add(V(0, C.H * sc, 0)).addScaledVector(fwd, -0.05 * C.D * sc);
       }
     }
     at.addScaledVector(dir, -0.05 * bs * P.recoil);
