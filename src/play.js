@@ -1294,7 +1294,6 @@ export function createPlay(ctx) {
   function setRide(kind) {
     if (!P || (kind !== 'walk' && !RIDES[kind])) return;
     if (kind !== 'walk' && P.rider) return toast('Get off the animal first. 🐴');
-    if (kind !== 'walk' && P.gear) setGear('none');
     if (held) drop(true);
     clearRide();
     P.state = P.grounded ? 'ground' : 'air'; // also clears a bail from the last ride
@@ -1747,6 +1746,7 @@ export function createPlay(ctx) {
       L.A.rotation.x = kind === 'blades' ? sg * Math.sin(R.stroke * Math.PI * 2) * 0.5 * (R.pushing ? 1 : 0.2) : R.steer * 0.3 * sg;
       L.B.rotation.x = -0.25;
     }
+    gearUpdate(dt);
     vis.updateMatrixWorld(true);
   }
 
@@ -2310,12 +2310,11 @@ export function createPlay(ctx) {
   // who holds the gear: you, or your old character sitting on the animal
   const wielder = () => (P.rider ? P.rider.char : P.char);
   function gearActive() {
-    return !!P.gear && P.ride === 'walk' && !held && (P.state === 'ground' || P.state === 'air' || P.state === 'drive') && P.stance !== 'crawl';
+    return !!P.gear && !held && (P.state === 'ground' || P.state === 'air' || P.state === 'drive' || P.state === 'grind') && P.stance !== 'crawl';
   }
   function setGear(id) {
     if (!P) return;
     if (id !== 'none' && !gearDef(id)) return;
-    if (id !== 'none' && P.ride !== 'walk') return toast('Hop off your ride first (V). 🛹');
     if (id !== 'none' && held) drop(true);
     if (P.gearMesh) {
       scene.remove(P.gearMesh.group);
@@ -2400,9 +2399,15 @@ export function createPlay(ctx) {
     if (gm && gm.muzzle) return gm.muzzle.getWorldPosition(V());
     return V(P.char.visual.position.x, P.char.visual.position.y + P.char.H * 0.8, P.char.visual.position.z);
   }
+  // the crosshair sits above the middle of the screen (ahead of you, not on top of your gun); shots fly through it
+  const CROSS_NDC = 0.22;
+  function aimDir() {
+    camera.updateMatrixWorld();
+    return V(0, CROSS_NDC, 0.5).unproject(camera).sub(camera.position).normalize();
+  }
   function aimPoint() {
     const o = camera.position.clone();
-    const d = camera.getWorldDirection(V());
+    const d = aimDir();
     const hit = ray(o, o.clone().addScaledVector(d, 90));
     return hit ? hit.point : o.clone().addScaledVector(d, 60);
   }
@@ -2414,7 +2419,7 @@ export function createPlay(ctx) {
     P.recoil = 1;
     const M = muzzleWorld();
     const base = aimPoint().sub(M);
-    if (base.length() < 1.0) base.copy(camera.getWorldDirection(V()));
+    if (base.length() < 1.0) base.copy(aimDir());
     base.normalize();
     for (let i = 0; i < G.pellets; i++) {
       const d = base.clone().add(V((Math.random() - 0.5) * 2 * G.spread, (Math.random() - 0.5) * 2 * G.spread, (Math.random() - 0.5) * 2 * G.spread)).normalize();
@@ -2684,7 +2689,7 @@ export function createPlay(ctx) {
     const bs = P.gearBs * sc;
     const fwd = fwdOf(P.yaw);
     const left = leftOf(P.yaw);
-    const aim = G.kind === 'gun' ? camera.getWorldDirection(V()) : fwd.clone();
+    const aim = G.kind === 'gun' ? aimDir() : fwd.clone();
     if (G.kind === 'gun') {
       aim.y = clamp(aim.y, -0.6, 0.7);
       aim.normalize();
@@ -3337,6 +3342,7 @@ export function createPlay(ctx) {
     get character() { return charId; },
     debug: {
       get P() { return P; },
+      aimDir,
       get world() { return world; },
       keys, pressedOnce,
       get props() { return props; },
