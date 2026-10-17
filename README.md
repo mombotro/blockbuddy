@@ -28,11 +28,26 @@ Press **🎮 Play** at the top to drop your model into a playground. Pick **My m
 | `Space` | jump, press again in the air to double jump (birds flap to fly) |
 | `C` / `X` | crouch (hold) / crawl (toggle). Low tunnels and beams make you duck by yourself |
 | walk into the brown wall | climb (`W` `S` `A` `D`, `Space` to leap off), you pull yourself over the top |
-| run + jump beside a wall | wall run, `Space` wall-jumps off |
+| run + jump beside a wall | wall run. It runs steady for a distance, then slows and arcs down. `Space` wall-jumps off |
+| run + jump at a wall | wall run up, same slow-down and arc (onto a climbing wall it grabs on at the top) |
 | `E` / click | pick up / drop the crate or ball in front of you |
 | click or `F` while holding | throw, hold longer to throw harder |
 | `1` `2` `3` | spawn a box, a ball, or **your model as a throwable toy** |
 | `R` / `T` | new playground / back to start |
+
+### 🛹 Skateboard, scooter, roller skates
+`V` (or the Ride buttons) swaps what you ride. Everyone can ride, even the horse.
+
+| | |
+|---|---|
+| `W` push · `A` `D` steer · `S` brake | momentum matters: ramps slow you down uphill and speed you up downhill, holding `W` on a ramp "pumps" it |
+| `Space` | ollie |
+| `J` `K` `L` in the air | skateboard: kickflip, heelflip, shove-it. scooter: barspin, tailwhip, tabletop (hold). skates: front flip, back flip, spread eagle (hold) |
+| `G` hold in the air | grab |
+| hold `A`/`D` in the air | spin (land every half turn, you ride switch) |
+| rails | land on a rail to grind, `Space` jumps off |
+
+Tricks stack into a combo. Land clean to bank it (points × number of tricks); land crooked, mid-trick or sideways and you bail and lose the combo. The skate park has a halfpipe, rails, a kicker, a fun box and a ledge.
 
 Legs are procedural IK, so feet land on stairs and ramps and every limb steps for itself. Hands reach for what you carry. The world scales to your model (a cat gets a small playground).
 For **your own animals**, name the limb bones like the premade ones: `LeftHip` -> `LeftKnee` -> `LeftAnkle` (or `FrontLeftShoulder` -> `FrontLeftKnee`, also `Left/RightShoulder` -> `Elbow` -> `Wrist` for arms). Bones named `Hips`, `Spine`, `Neck`, `Head`, `Tail…` and `LeftWing`/`RightWing` get extra motion. A model with no limb bones slides around.

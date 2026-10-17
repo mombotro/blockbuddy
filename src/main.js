@@ -1283,12 +1283,18 @@ function renderPlayHud() {
       <button data-act="mode:build" class="soft">◀ Back to building</button>
       <span class="who">Play as: ${who.map(([id, ic, l]) => `<button class="mini" data-act="playas:${id}" title="${l}">${ic} ${l}</button>`).join('')}</span>
       <span id="playState"></span>
+      <span class="who">Ride: ${[['walk', '🚶', 'Walk'], ['skate', '🛹', 'Skateboard'], ['scooter', '🛴', 'Scooter'], ['blades', '🛼', 'Roller skates']]
+        .map(([id, ic, l]) => `<button class="mini ${id === 'walk' ? 'on' : ''}" data-act="ride:${id}" title="${l}">${ic} ${l}</button>`)
+        .join('')}</span>
     </div>
+    <div id="rideCombo" hidden></div>
+    <div id="rideScore" hidden></div>
     <div id="playHelp">
       <b>🎮 Controls</b>
       <span><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> move · <kbd>Shift</kbd> run · <kbd>Space</kbd> jump (twice for a double jump!)</span>
       <span><kbd>C</kbd> crouch · <kbd>X</kbd> crawl · <kbd>E</kbd> pick up / drop · click or <kbd>F</kbd> throw (hold to throw harder)</span>
       <span>🧗 Walk into the <b>brown wall</b> to climb · 🏃 Run and jump next to a wall to <b>wall run</b> · 🤸 Pink pad = bounce</span>
+      <span>🛹 <kbd>V</kbd> swap ride (skateboard · scooter · roller skates): <kbd>W</kbd> push · <kbd>A</kbd><kbd>D</kbd> steer · <kbd>S</kbd> brake · <kbd>Space</kbd> ollie · in the air <kbd>J</kbd> <kbd>K</kbd> <kbd>L</kbd> tricks, <kbd>G</kbd> grab, hold <kbd>A</kbd>/<kbd>D</kbd> to spin. Land clean to bank your combo!</span>
       <span><kbd>1</kbd> box · <kbd>2</kbd> ball · <kbd>3</kbd> <b>your model</b> as a toy · <kbd>R</kbd> new playground · <kbd>T</kbd> go back to start</span>
       <span>Click the picture to look around with the mouse (<kbd>Esc</kbd> lets go). Arrow keys also turn the camera. Scroll to zoom. <kbd>H</kbd> hides this box.</span>
     </div>`;
@@ -1720,6 +1726,8 @@ document.addEventListener('click', (e) => {
     case 'mode': return setMode(arg);
     case 'playas':
       return play && play.setCharacter(arg);
+    case 'ride':
+      return play && play.setRide(arg);
     case 'shape': return swapShapeTo(arg);
     case 'stick': return stickOn(arg);
     case 'stickto': return startStick();

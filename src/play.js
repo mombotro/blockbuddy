@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import * as CANNON from 'cannon-es';
 import { STARTERS } from './rigs.js';
 import { registry } from './nodes.js';
+import { RIDES, RIDE_ORDER, TRICKS, buildVehicle, buildSkate } from './ride.js';
 
 // ============================================================================
 // Play mode: a physics sandbox for testing models.
@@ -180,6 +181,7 @@ export function createPlay(ctx) {
     scene.add(sp);
   }
   let groundMat, propMat, ballMat, bounceMat, playerMat;
+  let rails = [];
 
   function buildScene() {
     scene = new THREE.Scene();
@@ -293,6 +295,67 @@ export function createPlay(ctx) {
       scene.add(trunk, top);
       ownGeos.push(trunk.geometry, top.geometry);
     }
+    buildSkatePark();
+  }
+
+
+  // ------------------------------------------------------------------ the skate park
+  function quarterPipe({ x, z, width, R, dir, color }) {
+    const N = 12;
+    for (let k = 0; k < N; k++) {
+      const t0 = (k * Math.PI) / 2 / N;
+      const t1 = ((k + 1) * Math.PI) / 2 / N;
+      const tm = (t0 + t1) / 2;
+      const p0 = [x + dir * R * Math.sin(t0), R - R * Math.cos(t0)];
+      const p1 = [x + dir * R * Math.sin(t1), R - R * Math.cos(t1)];
+      const mid = [(p0[0] + p1[0]) / 2, (p0[1] + p1[1]) / 2];
+      const chord = Math.hypot(p1[0] - p0[0], p1[1] - p0[1]);
+      const nx = -dir * Math.sin(tm);
+      const ny = Math.cos(tm);
+      addBox({ size: [chord + 0.06, 0.4, width], pos: [mid[0] - nx * 0.2, mid[1] - ny * 0.2, z], rot: [0, 0, Math.atan2(Math.sin(tm), dir * Math.cos(tm))], color });
+    }
+    addBox({ size: [3, 0.4, width], pos: [x + dir * (R + 1.5), R - 0.2, z], color: 0x9aa5b1 }); // flat deck on top
+  }
+  // a grind rail; a and b are the two ends of its top surface
+  function addRail(a, b) {
+    const A = V(a[0] * ws, a[1] * ws, a[2] * ws);
+    const B = V(b[0] * ws, b[1] * ws, b[2] * ws);
+    const dir = B.clone().sub(A);
+    const len = dir.length();
+    dir.normalize();
+    const thick = 0.09 * ws;
+    const g = new THREE.BoxGeometry(thick, thick, len);
+    ownGeos.push(g);
+    const m = new THREE.Mesh(g, new THREE.MeshStandardMaterial({ color: 0xd1d5db, metalness: 0.7, roughness: 0.3 }));
+    m.castShadow = true;
+    const q = new THREE.Quaternion().setFromUnitVectors(V(0, 0, 1), dir);
+    m.quaternion.copy(q);
+    m.position.copy(A.clone().add(B).multiplyScalar(0.5)).addScaledVector(UP, -thick / 2);
+    scene.add(m);
+    const body = new CANNON.Body({ mass: 0, material: groundMat });
+    body.addShape(new CANNON.Box(new CANNON.Vec3(thick / 2, thick / 2, len / 2)));
+    body.position.set(m.position.x, m.position.y, m.position.z);
+    body.quaternion.set(q.x, q.y, q.z, q.w);
+    body.collisionFilterGroup = WORLD;
+    body.collisionFilterMask = WORLD | PLAYER | HELD;
+    body.userData = { rail: true };
+    world.addBody(body);
+    statics.push(body);
+    rails.push({ body, a: A, b: B, dir, len, thick });
+    for (const e of [a, b]) addBox({ size: [0.1, e[1] - 0.05, 0.1], pos: [e[0], (e[1] - 0.05) / 2, e[2]], color: 0x64748b, solid: false });
+  }
+  function buildSkatePark() {
+    rails = [];
+    sign('SKATE PARK', [42, 6.8, 2]);
+    addBox({ size: [34, 0.3, 36], pos: [42, -0.14, 15], color: 0xb8c0cc });
+    quarterPipe({ x: 36, z: 10, width: 8, R: 3, dir: -1, color: 0xc7ced9 });
+    quarterPipe({ x: 46, z: 10, width: 8, R: 3, dir: 1, color: 0xc7ced9 });
+    addRail([35, 0.55, 22], [44, 0.55, 22]);
+    addRail([46, 1.4, 22], [53, 0.3, 22]);
+    addBox({ size: [3, 0.3, 4], pos: [40, 0.4, 28.5], rot: [-0.33, 0, 0], color: 0xffb703 }); // kicker
+    addBox({ size: [5, 0.7, 5], pos: [48, 0.35, 29], color: 0xa3b1c2 }); // fun box
+    addBox({ size: [5, 0.3, 3], pos: [48, 0.33, 25.9], rot: [0.28, 0, 0], color: 0xffb703 });
+    addBox({ size: [6, 0.5, 1], pos: [38, 0.25, 17], color: 0x9aa5b1 }); // ledge
   }
 
   // ------------------------------------------------------------------ character
@@ -379,6 +442,7 @@ export function createPlay(ctx) {
     if (!running) return;
     charId = id;
     if (P) {
+      clearRide();
       scene.remove(P.char.visual);
       world.removeBody(P.body);
       if (held) drop(true);
@@ -421,6 +485,7 @@ export function createPlay(ctx) {
       wall: null, wallT: 0, wallCool: 0, climbN: null, climbCool: 0, mantle: null, antiGrav: 0,
       charge: 0, throwAnim: 0, landT: 0, airT: 0, bounceCool: 0, flap: 0,
       speedH: 0, label: '', who: charId,
+      ride: 'walk', rs: null, veh: null, rideRoot: null, skates: null, score: 0, best: 0, groundNormal: UP.clone(),
     };
     snapFeet();
     updateHud();
@@ -442,6 +507,7 @@ export function createPlay(ctx) {
     dyn = [];
     statics = [];
     props = [];
+    rails = [];
     held = null;
     ownGeos.splice(0).forEach((g) => g.dispose());
     buildContents();
@@ -553,6 +619,7 @@ export function createPlay(ctx) {
   }
 
   function animate(dt) {
+    if (P.ride !== 'walk') return animateRide(dt);
     const C = P.char;
     const b = P.body;
     const vis = C.visual;
@@ -560,9 +627,10 @@ export function createPlay(ctx) {
     P.speedH = speedH;
     const state = P.state;
     // body orientation
-    const wantPitch = P.stance === 'crawl' && C.biped && state === 'ground' ? 1.2 : state === 'climb' ? -0.05 : 0;
+    const wallFade = P.wall ? clamp(0.35 + 0.65 * (P.wall.speed / Math.max(P.wall.s0, 0.1)), 0.35, 1) : 1;
+    const wantPitch = P.stance === 'crawl' && C.biped && state === 'ground' ? 1.2 : state === 'climb' ? -0.05 : state === 'wallup' ? -0.28 * wallFade : 0;
     C.pitch = damp(C.pitch, wantPitch, 8, dt);
-    const wantRoll = state === 'wallrun' && P.wall ? P.wall.side * 0.55 : 0;
+    const wantRoll = state === 'wallrun' && P.wall ? P.wall.side * 0.5 * wallFade : 0;
     C.roll = damp(C.roll, wantRoll, 10, dt);
     vis.position.set(b.position.x, b.position.y - P.r, b.position.z);
     vis.rotation.set(C.pitch, P.yaw, C.roll, 'YXZ');
@@ -624,9 +692,12 @@ export function createPlay(ctx) {
       } else if (state === 'climb' && P.climbN) {
         ideal = (L) => idealWallLimb(L);
         stepLimbs([...C.legs, ...C.arms.filter(() => C.biped)], ideal, dt, 2, false);
-      } else if (state === 'wallrun' && P.wall) {
-        ideal = (L) => idealWallRunLeg(L);
-        stepLimbs(C.legs, ideal, dt, 8, true);
+      } else if ((state === 'wallrun' || state === 'wallup') && P.wall) {
+        // a real running cycle: opposite legs swing opposite ways, and it slows down with the run
+        for (const L of C.legs) {
+          L.step = null;
+          L.foot.lerp(wallCycleFoot(L, P.wall, state === 'wallup'), 1 - Math.exp(-32 * dt));
+        }
       } else if (P.stance === 'crawl' && C.biped) {
         ideal = (L) => (L.kind === 'arm' ? idealCrawlArm(L) : idealCrawlLeg(L));
         stepLimbs([...C.legs, ...C.arms], ideal, dt, speedH + 1, false);
@@ -664,13 +735,24 @@ export function createPlay(ctx) {
     const y = L.kind === 'arm' ? p.y + L.restShoulderY * 0.95 + 0.25 * C.H : high ? p.y + 0.8 * C.H : p.y + (C.quad ? 0.25 : 0.18) * C.H;
     return V(base.x + lat.x + N.x * 0.03, y, base.z + lat.z + N.z * 0.03);
   }
-  function idealWallRunLeg(L) {
+  // where a foot is on the wall at this point in the run cycle
+  function wallCycleFoot(L, W, up) {
     const C = P.char;
-    const W = P.wall;
     const p = C.visual.position;
-    const fwd = fwdOf(P.yaw);
-    const lead = fwd.clone().multiplyScalar((L.side > 0 ? 0.28 : -0.28) * C.H * 0.6 + P.speedH * 0.06);
-    return V(p.x - W.N.x * (P.r + 0.08) + lead.x, p.y + 0.35 * C.H + (L.side > 0 ? 0.0 : 0.12), p.z - W.N.z * (P.r + 0.08) + lead.z);
+    const N = W.N;
+    const dW = W.dWall ?? P.r + 0.03;
+    const slow = clamp(W.speed / Math.max(W.s0, 0.1), 0, 1); // 1 = full speed, 0 = about to fall
+    const ph = W.phase + (L.group ? Math.PI : 0);
+    const amp = (up ? 0.26 : 0.3) * C.H * clamp(0.3 + 0.7 * slow, 0.3, 1);
+    const along = Math.sin(ph) * amp;
+    const lift = Math.max(0, Math.cos(ph)) * 0.16 * C.H * clamp(0.3 + 0.7 * slow, 0.3, 1);
+    const axis = up ? UP : W.tangent;
+    const lateral = up ? leftOf(P.yaw).multiplyScalar(L.restXZ.x * 0.8) : V();
+    const y0 = p.y + (up ? 0.42 : 0.38) * C.H + (C.quad && !L.front ? -0.05 * C.H : 0);
+    return V(p.x - N.x * dW, y0, p.z - N.z * dW)
+      .addScaledVector(axis, along)
+      .addScaledVector(N, 0.03 + lift) // the foot peels off the wall as it swings forward
+      .add(lateral);
   }
   function idealCrawlArm(L) {
     const A = L.A.getWorldPosition(V());
@@ -722,7 +804,7 @@ export function createPlay(ctx) {
       return;
     }
     // plain walking: swing the arms; in the air throw them up
-    const wantZ = state === 'air' ? (P.body.velocity.y > 0 ? 2.1 : 1.1) : state === 'wallrun' ? 1.3 : P.stance === 'crouch' ? 0.25 : 0;
+    const wantZ = state === 'air' ? (P.body.velocity.y > 0 ? 2.1 : 1.1) : state === 'wallrun' || state === 'wallup' ? 1.2 : P.stance === 'crouch' ? 0.25 : 0;
     C.armZ = damp(C.armZ, wantZ, 10, dt);
     for (const L of C.arms) {
       const s = L.side;
@@ -730,6 +812,11 @@ export function createPlay(ctx) {
       const swing = Math.sin(C.phase) * (0.35 + 0.6 * sw) * (state === 'ground' ? sw * 1.5 + 0.0 : 0);
       L.A.rotation.x = s > 0 ? swing : -swing;
       L.B.rotation.x = -(0.15 + 0.85 * sw) * (state === 'ground' ? 1 : 0.2);
+      if ((state === 'wallrun' || state === 'wallup') && P.wall) {
+        const slow = clamp(P.wall.speed / Math.max(P.wall.s0, 0.1), 0, 1);
+        const sg = L.side > 0 ? 1 : -1;
+        L.A.rotation.x = Math.sin(P.wall.phase + (L.side > 0 ? 0 : Math.PI)) * 0.85 * (0.3 + 0.7 * slow) * sg;
+      }
     }
   }
 
@@ -744,6 +831,7 @@ export function createPlay(ctx) {
     return V(p.x + f.x * dist, p.y + h, p.z + f.z * dist);
   }
   function tryPickUp() {
+    if (P.ride !== 'walk') return toast('Hop off first (V) to pick things up. 🛹');
     if (held) return drop(false);
     const p = P.char.visual.position;
     const f = fwdOf(P.yaw);
@@ -850,6 +938,499 @@ export function createPlay(ctx) {
     toast('Your model is in the playground! Push it, pick it up (E), throw it! 🧸');
   }
 
+
+  // ------------------------------------------------------------------ riding (skateboard, scooter, roller skates)
+  const wrapTo = (a, m) => {
+    let x = a % m;
+    if (x > m / 2) x -= m;
+    if (x < -m / 2) x += m;
+    return x;
+  };
+  function clearRide() {
+    if (!P) return;
+    if (P.rideRoot) scene.remove(P.rideRoot);
+    (P.skates || []).forEach((k) => scene.remove(k.group));
+    P.rideRoot = null;
+    P.skates = null;
+    P.veh = null;
+  }
+  function cycleRide() {
+    setRide(RIDE_ORDER[(RIDE_ORDER.indexOf(P.ride) + 1) % RIDE_ORDER.length]);
+  }
+  function setRide(kind) {
+    if (!P || (kind !== 'walk' && !RIDES[kind])) return;
+    if (held) drop(true);
+    clearRide();
+    P.state = P.grounded ? 'ground' : 'air'; // also clears a bail from the last ride
+    P.ride = kind;
+    P.rs = null;
+    P.stance = 'stand';
+    P.crawlToggle = false;
+    if (kind === 'walk') {
+      toast('Walking again. 🚶');
+      updateRideHud();
+      return;
+    }
+    const C = P.char;
+    const cfg = RIDES[kind];
+    const bs = clamp(C.quad ? Math.max(C.D, C.H) / 1.0 : C.H / 1.7, 0.4, 1.5);
+    const len = C.quad ? Math.max(0.85 * bs, C.D * 0.95) : 0.85 * bs;
+    const wid = C.quad ? Math.max(0.24 * bs, C.W * 0.9) : 0.24 * bs;
+    P.veh = buildVehicle(kind, { bs, len, wid, H: C.H });
+    if (kind === 'blades') {
+      P.skates = C.legs.map(() => {
+        const k = buildSkate(bs);
+        scene.add(k.group);
+        return k;
+      });
+    } else {
+      P.rideRoot = new THREE.Group();
+      P.rideRoot.add(P.veh.root);
+      scene.add(P.rideRoot);
+    }
+    P.rs = {
+      heading: P.yaw, speed: 0, sw: false, fakie: false, spin: 0, spinVel: 0,
+      boardRoll: 0, boardYaw: 0, bodyFlip: 0, barSpin: 0, spread: 0, grabK: 0,
+      anims: [], hold: {}, holdT: {}, holdDone: {}, combo: [], comboPts: 0,
+      wasAir: false, airT: 0, bailT: 0, norm: V(0, 1, 0), steer: 0, stroke: 0, pushing: false,
+      rail: null, gs: 0, visYaw: 0, bs, len, wid,
+    };
+    toast(`${cfg.icon} ${cfg.label}! W push · A/D steer · S brake · Space ollie · J K L tricks · G grab · V swap ride`);
+    updateRideHud();
+  }
+
+  // ---- scoring
+  function addTrick(name, pts) {
+    const R = P.rs;
+    R.combo.push({ name, pts });
+    R.comboPts += pts;
+    updateRideHud();
+  }
+  function bankCombo() {
+    const R = P.rs;
+    if (!R.combo.length) return;
+    const total = Math.round(R.comboPts * R.combo.length);
+    P.score += total;
+    P.best = Math.max(P.best, total);
+    R.lastBank = { total, names: R.combo.map((c) => c.name).join(' + '), t: P.time };
+    R.combo = [];
+    R.comboPts = 0;
+    updateRideHud();
+  }
+  function startBail(reason) {
+    const R = P.rs;
+    P.state = 'bail';
+    R.bailT = 0;
+    R.combo = [];
+    R.comboPts = 0;
+    R.anims = [];
+    R.speed *= 0.4;
+    R.rail = null;
+    toast(`Bail! ${reason} 😵 You lose the combo.`);
+    updateRideHud();
+  }
+  function landing() {
+    const R = P.rs;
+    const cfg = RIDES[P.ride];
+    // tricks that are almost done finish themselves; early ones are a bail
+    for (const a of R.anims) {
+      if (a.t / a.dur > 0.72) {
+        R[a.prop] = a.to;
+        addTrick(a.name, a.pts);
+      }
+    }
+    const midTrick = R.anims.some((a) => a.t / a.dur <= 0.72);
+    R.anims = [];
+    const okFlip =
+      Math.abs(wrapTo(R.boardRoll, Math.PI * 2)) < 0.5 && Math.abs(wrapTo(R.boardYaw, Math.PI * 2)) < 0.5 && Math.abs(wrapTo(R.bodyFlip, Math.PI * 2)) < 0.5;
+    const okSpin = Math.abs(wrapTo(R.spin, Math.PI)) < 0.65;
+    if (midTrick || !okFlip || !okSpin) {
+      R.spin = 0;
+      R.boardRoll = R.boardYaw = R.bodyFlip = R.barSpin = 0;
+      return startBail(midTrick ? 'Landed in the middle of a trick!' : !okSpin ? 'You landed sideways!' : 'The board was upside down!');
+    }
+    const halves = Math.round(R.spin / Math.PI);
+    if (halves) {
+      addTrick(`${Math.abs(halves) * 180}`, 40 * Math.abs(halves));
+      if (Math.abs(halves) % 2 === 1) cfg.sideways ? (R.sw = !R.sw) : (R.fakie = !R.fakie);
+    }
+    if (R.airT > 0.9) addTrick('Big air', Math.round(R.airT * 60));
+    if (R.holdDone.grab) addTrick('Grab', 80);
+    R.spin = 0;
+    R.boardRoll = R.boardYaw = R.bodyFlip = R.barSpin = 0;
+    bankCombo();
+  }
+
+  // ---- tricks
+  function advanceTricks(dt) {
+    const R = P.rs;
+    const air = P.state === 'air';
+    for (const a of [...R.anims]) {
+      a.t += dt;
+      const e = smooth(Math.min(1, a.t / a.dur));
+      R[a.prop] = a.from + (a.to - a.from) * e;
+      if (a.t >= a.dur) {
+        R[a.prop] = a.to;
+        addTrick(a.name, a.pts);
+        R.anims.splice(R.anims.indexOf(a), 1);
+      }
+    }
+    // hold tricks (tabletop, spread eagle) and grabs
+    const table = TRICKS[P.ride];
+    for (const T of Object.values(table)) {
+      if (!T.hold) continue;
+      const on = air && !!R.hold[T.prop];
+      R[T.prop] = damp(R[T.prop], on ? T.hold : 0, 14, dt);
+      R.holdT[T.prop] = on ? (R.holdT[T.prop] || 0) + dt : 0;
+      if (on && R.holdT[T.prop] > 0.4 && !R.holdDone[T.prop]) {
+        R.holdDone[T.prop] = true;
+        addTrick(T.name, T.pts);
+      }
+    }
+    R.grabK = damp(R.grabK, air && R.hold.grab ? 1 : 0, 12, dt);
+    R.holdT.grab = air && R.hold.grab ? (R.holdT.grab || 0) + dt : 0;
+    if (R.holdT.grab > 0.35 && !R.holdDone.grab) {
+      R.holdDone.grab = true;
+      addTrick('Grab', 80);
+    }
+  }
+  function tricksInput() {
+    const R = P.rs;
+    const table = TRICKS[P.ride];
+    for (const code of ['KeyJ', 'KeyK', 'KeyL']) {
+      const T = table[code];
+      if (!T) continue;
+      if (T.hold) R.hold[T.prop] = key(code);
+      else if (once(code) && !R.anims.some((a) => a.prop === T.prop)) R.anims.push({ prop: T.prop, from: R[T.prop], to: R[T.prop] + T.amt, t: 0, dur: T.dur, name: T.name, pts: T.pts });
+    }
+    R.hold.grab = key('KeyG');
+  }
+
+  // ---- rails
+  function railAssist(v) {
+    const R = P.rs;
+    if (!rails.length || v.y > 2.2 || R.speed < 1.5 || P.state !== 'air') return;
+    const b = P.body;
+    const feet = V(b.position.x, b.position.y - P.r, b.position.z);
+    for (const rl of rails) {
+      const ab = rl.b.clone().sub(rl.a);
+      const t = clamp(feet.clone().sub(rl.a).dot(ab) / ab.lengthSq(), 0.02, 0.98);
+      const q = rl.a.clone().addScaledVector(ab, t);
+      const lat = Math.hypot(feet.x - q.x, feet.z - q.z);
+      const dy = feet.y - q.y;
+      if (lat < 0.5 * ws && dy > -0.2 * ws && dy < 0.55 * ws) return startGrind(rl, v);
+    }
+  }
+  function startGrind(rl, v) {
+    const R = P.rs;
+    P.state = 'grind';
+    R.rail = rl;
+    R.gs = v.x * rl.dir.x + v.y * rl.dir.y + v.z * rl.dir.z;
+    if (Math.abs(R.gs) < 2) R.gs = Math.sign(R.gs || 1) * 2;
+    R.grindT = 0;
+    R.grindItem = { name: 'Grind', pts: 0 };
+    R.combo.push(R.grindItem);
+    R.anims = [];
+    R.spin = 0;
+    R.boardRoll = R.boardYaw = R.bodyFlip = R.barSpin = 0;
+    toast('Grind! 🔩 Space to jump off.');
+  }
+  function grindStep(dt, v) {
+    const R = P.rs;
+    const b = P.body;
+    const rl = R.rail;
+    R.grindT += dt;
+    R.gs -= Math.sign(R.gs) * 0.35 * dt;
+    const s = Math.sign(R.gs) || 1;
+    const feet = V(b.position.x, b.position.y - P.r, b.position.z);
+    const ab = rl.b.clone().sub(rl.a);
+    let t = feet.clone().sub(rl.a).dot(ab) / ab.lengthSq();
+    t += (R.gs * dt) / rl.len;
+    R.heading = Math.atan2(rl.dir.x * s, rl.dir.z * s);
+    R.grindItem.pts = Math.round(R.grindT * 70);
+    R.comboPts = R.combo.reduce((x, c) => x + c.pts, 0);
+    if (P.jumpBuf > 0) {
+      P.jumpBuf = 0;
+      v.set(rl.dir.x * R.gs, P.jumpV * 0.85, rl.dir.z * R.gs);
+      v.y += rl.dir.y * R.gs;
+      P.state = 'air';
+      R.rail = null;
+      R.wasAir = true;
+      R.airT = 0;
+      return;
+    }
+    if (t < 0 || t > 1 || Math.abs(R.gs) < 0.8) {
+      // off the end of the rail
+      v.set(rl.dir.x * R.gs, rl.dir.y * R.gs + 1.0, rl.dir.z * R.gs);
+      P.state = 'air';
+      R.rail = null;
+      R.wasAir = true;
+      R.airT = 0;
+      return;
+    }
+    const q = rl.a.clone().addScaledVector(ab, t);
+    b.position.set(q.x, q.y + P.r + 0.01, q.z);
+    v.set(rl.dir.x * R.gs, rl.dir.y * R.gs, rl.dir.z * R.gs);
+    R.speed = Math.abs(R.gs);
+    R.wasAir = false;
+  }
+  function bailStep(dt, v) {
+    const R = P.rs;
+    R.bailT += dt;
+    const k = Math.min(1, 3.5 * dt);
+    v.x *= 1 - k;
+    v.z *= 1 - k;
+    R.speed = Math.hypot(v.x, v.z);
+    if (R.bailT > 1.5) {
+      P.state = P.grounded ? 'ground' : 'air';
+      R.speed = 0;
+      R.bailT = 0;
+      R.spin = 0;
+    }
+  }
+
+  // ---- the ride itself
+  function rideStep(dt, fi, steerIn, running_) {
+    const R = P.rs;
+    const cfg = RIDES[P.ride];
+    const b = P.body;
+    const v = b.velocity;
+    advanceTricks(dt);
+    P.yawTarget = R.heading;
+    if (P.state === 'bail') return bailStep(dt, v);
+    if (P.state === 'grind') return grindStep(dt, v);
+    if (P.grounded) {
+      P.state = 'ground';
+      once('KeyJ');
+      once('KeyK');
+      once('KeyL');
+      R.holdDone = {};
+      if (P.groundBody && P.groundBody.userData && P.groundBody.userData.rail && Math.abs(R.speed) > 1.5) {
+        const rl = rails.find((r) => r.body === P.groundBody);
+        if (rl) return startGrind(rl, v);
+      }
+      if (R.wasAir) {
+        R.wasAir = false;
+        landing();
+        if (P.state === 'bail') return;
+      }
+      R.airT = 0;
+      const n = P.groundNormal.clone();
+      if (Math.abs(R.speed) > 0.3) R.heading += steerIn * cfg.turn * clamp(Math.abs(R.speed) / 3, 0.25, 1) * dt * (R.speed < 0 ? -1 : 1);
+      if (R.speed < -1.2) {
+        // rolled backwards down a ramp: turn around and ride out forwards
+        R.heading += Math.PI;
+        R.visYaw = -Math.PI;
+        R.speed = -R.speed;
+      }
+      const Fh = fwdOf(R.heading);
+      const d = Fh.clone().addScaledVector(n, -Fh.dot(n));
+      if (d.lengthSq() < 1e-4) d.copy(Fh);
+      d.normalize();
+      const cap = cfg.maxPush * (running_ ? 1.25 : 1);
+      R.pushing = fi > 0 && R.speed < cap;
+      if (R.pushing) R.speed += cfg.pushAcc * dt * (R.speed < 1 ? 1.6 : 1);
+      if (fi < 0) R.speed = Math.max(0, R.speed - cfg.brake * dt);
+      R.speed -= Math.sign(R.speed) * cfg.fric * dt;
+      R.speed += -GRAVITY * d.y * dt * 0.95; // downhill speeds you up, uphill slows you
+      // pump the transitions: holding W while you ride a ramp builds speed, like in the games
+      if (fi > 0 && Math.abs(d.y) > 0.25 && Math.abs(R.speed) > 2) R.speed += Math.sign(R.speed) * 14 * Math.abs(d.y) * dt;
+      if (R.speed > cap && Math.abs(d.y) < 0.15) R.speed -= (R.speed - cap) * 0.5 * dt;
+      R.speed = clamp(R.speed, -2.5, 24);
+      v.set(d.x * R.speed - n.x * 0.8, d.y * R.speed - n.y * 0.8, d.z * R.speed - n.z * 0.8);
+      if (P.jumpBuf > 0 && (P.grounded || P.coyote > 0)) {
+        P.jumpBuf = 0;
+        v.y = Math.max(v.y, 0) + P.jumpV * cfg.ollie;
+        P.grounded = false;
+        P.coyote = 0;
+        P.state = 'air';
+        R.wasAir = true;
+        R.airT = 0;
+        R.spin = 0;
+      }
+    } else {
+      P.state = 'air';
+      R.wasAir = true;
+      R.airT += dt;
+      R.spinVel = damp(R.spinVel, steerIn * 7.5, 9, dt);
+      R.spin += R.spinVel * dt;
+      R.speed = v.x * fwdOf(R.heading).x + v.z * fwdOf(R.heading).z;
+      R.pushing = false;
+      railAssist(v);
+      if (P.state === 'air') tricksInput();
+    }
+  }
+
+  function animateRide(dt) {
+    const C = P.char;
+    const R = P.rs;
+    const b = P.body;
+    const vis = C.visual;
+    const cfg = RIDES[P.ride];
+    const v = b.velocity;
+    const sp = Math.hypot(v.x, v.z);
+    P.speedH = sp;
+    const state = P.state;
+    const kind = P.ride;
+    const steer = (key('KeyA') ? 1 : 0) - (key('KeyD') ? 1 : 0);
+    R.steer = damp(R.steer, state === 'ground' ? steer : 0, 10, dt);
+    // pushing animation clock
+    const rate = 1.5 + R.speed * 0.12;
+    if (R.pushing) R.stroke += dt * rate;
+    else if (R.stroke % 1 > 1e-3) {
+      const base = Math.floor(R.stroke);
+      R.stroke = Math.min(base + 1, R.stroke + dt * 2.6);
+    }
+    const wantN = state === 'air' || state === 'bail' || state === 'grind' ? UP : P.groundNormal;
+    R.norm.lerp(wantN, 1 - Math.exp(-(state === 'air' ? 2.5 : 16) * dt)).normalize();
+    const qN = new THREE.Quaternion().setFromUnitVectors(UP, R.norm);
+    R.visYaw = damp(R.visYaw, 0, 9, dt);
+    const qH = yawQ(R.heading + R.visYaw);
+    const qRide = qN.clone().multiply(qH);
+    const feet = V(b.position.x, b.position.y - P.r, b.position.z);
+    const grabLift = 0.22 * C.H * R.grabK;
+    // the board (or scooter)
+    if (P.rideRoot) {
+      P.rideRoot.position.copy(feet);
+      P.rideRoot.quaternion.copy(qRide);
+      const tilt = state === 'air' ? clamp(v.y * 0.04, -0.3, 0.3) : 0;
+      P.veh.deck.rotation.set(-tilt, R.boardYaw, R.boardRoll, 'YXZ');
+      P.veh.deck.position.y = grabLift;
+      if (P.veh.bars) P.veh.bars.rotation.y = R.barSpin;
+      if (state === 'bail') P.rideRoot.position.add(fwdOf(R.heading).multiplyScalar(Math.min(1.2, R.bailT * 1.6)));
+      P.rideRoot.updateMatrixWorld(true);
+    }
+    // the rider's orientation
+    const yawOff = (cfg.sideways ? (R.sw ? Math.PI / 2 : -Math.PI / 2) : 0) + (!cfg.sideways && R.fakie ? Math.PI : 0);
+    const lean = -R.steer * 0.25 * clamp(sp / 6, 0, 1);
+    const qBase = qN.clone().multiply(qH).multiply(new THREE.Quaternion().setFromAxisAngle(V(0, 0, 1), lean)).multiply(new THREE.Quaternion().setFromAxisAngle(UP, yawOff + R.spin));
+    const qFlip = new THREE.Quaternion().setFromAxisAngle(V(1, 0, 0), R.bodyFlip);
+    let lie = 0;
+    if (state === 'bail') {
+      const t = R.bailT;
+      lie = t < 0.3 ? smooth(t / 0.3) * 1.45 : t < 1.0 ? 1.45 : 1.45 * (1 - smooth(clamp((t - 1.0) / 0.45, 0, 1)));
+    }
+    const qLie = new THREE.Quaternion().setFromAxisAngle(V(1, 0, 0), lie);
+    const com = V(0, C.H * 0.5, 0);
+    const shift = com.clone().sub(com.clone().applyQuaternion(qFlip)).applyQuaternion(qBase);
+    vis.position.copy(feet).add(shift);
+    vis.quaternion.copy(qBase).multiply(qFlip).multiply(qLie);
+    // pose
+    for (const j of C.joints) {
+      j.quaternion.copy(j.userData.rest.q);
+      j.position.copy(j.userData.rest.p);
+    }
+    const hipsRest = C.hips ? C.hips.userData.rest.p.y : 0;
+    const tuck = (R.grabK * 0.3 + (state === 'air' ? 0.08 : 0)) * hipsRest;
+    const wantDy = state === 'bail' ? 0 : -(C.quad ? 0.14 : 0.24) * hipsRest - tuck;
+    C.hipsDy = damp(C.hipsDy, wantDy, 10, dt);
+    if (C.hips) C.hips.position.y = hipsRest + C.hipsDy;
+    if (C.spine && state !== 'bail') C.spine.rotation.x = 0.12 + 0.55 * R.grabK;
+    C.tails.forEach((t, i) => (t.rotation.y = Math.sin(P.time * 3 + i) * 0.2));
+    vis.updateMatrixWorld(true);
+
+    // feet
+    const toW = (x, y, z) => V(x, y, z).applyQuaternion(qRide).add(feet);
+    const len = R.len;
+    const wid = R.wid;
+    const deckY = P.veh ? P.veh.deckY : 0;
+    const spread = R.spread;
+    C.legs.forEach((L, i) => {
+      if (state === 'bail') {
+        L.A.rotation.x = Math.sin(P.time * 14 + (L.group ? 3 : 0)) * 0.9;
+        L.B.rotation.x = 0.6;
+        return;
+      }
+      let tgt;
+      if (kind === 'skate' || (kind === 'scooter' && C.quad)) {
+        if (C.quad) tgt = toW(L.side * wid * 0.22, deckY + L.footH + grabLift, (L.front ? 1 : -1) * len * 0.27);
+        else {
+          const lead = L.side > 0 !== R.sw ? 1 : -1;
+          tgt = toW(0, deckY + L.footH + grabLift, lead * len * 0.22);
+        }
+      } else if (kind === 'scooter') {
+        const front = L.side > 0 !== R.sw; // left foot leads
+        if (front) tgt = toW(0, deckY + L.footH, len * 0.17);
+        else {
+          // the pushing foot: back to the ground, kick, return
+          const ph = R.stroke % 1;
+          let z;
+          let y;
+          if (ph < 0.5) {
+            const u = smooth(ph / 0.5);
+            z = -len * 0.38 + (-len * 0.95 + len * 0.38) * u;
+            y = L.footH + 0.02 + (deckY - 0.02) * (1 - Math.min(1, ph * 6));
+          } else {
+            const u = smooth((ph - 0.5) / 0.5);
+            z = -len * 0.95 + (len * 0.95 - len * 0.38) * u;
+            y = deckY + L.footH + Math.sin(Math.PI * u) * 0.14 * R.bs;
+          }
+          tgt = toW(0, y, z);
+        }
+      } else {
+        // roller skates: feet are the skates and they stroke as you push
+        const skate = P.skates && P.skates[i];
+        const wh = skate ? skate.wheelH : 0.05;
+        const amp = R.pushing ? 1 : 0.25;
+        const ph = R.stroke * Math.PI * 2 + (L.group ? Math.PI : 0);
+        const out = Math.max(0, Math.sin(ph)) * 0.09 * R.bs * amp * L.side + L.side * 0.1 * spread * R.bs * 2;
+        const z = Math.sin(ph + Math.PI / 2) * 0.14 * R.bs * amp + L.restXZ.z * 0.9;
+        const y = L.footH + wh + Math.max(0, -Math.sin(ph)) * 0.05 * R.bs * amp + grabLift;
+        tgt = toW(L.restXZ.x * 0.9 + out, y, z);
+      }
+      L.foot.lerp(tgt, 1 - Math.exp(-40 * dt));
+      solveLimb(L, L.foot, poleWorld(L), qRide);
+      if (P.skates && P.skates[i]) {
+        const k = P.skates[i];
+        const wh = k.wheelH;
+        k.group.position.set(L.foot.x, L.foot.y - L.footH - wh, L.foot.z);
+        k.group.quaternion.copy(qRide);
+      }
+    });
+    // arms
+    const gl = new THREE.Quaternion();
+    vis.getWorldQuaternion(gl);
+    for (const L of C.arms) {
+      const sg = L.side > 0 ? 1 : -1;
+      if (state === 'bail') {
+        L.A.rotation.z = sg * (1.6 + Math.sin(P.time * 16) * 0.6);
+        L.A.rotation.x = Math.sin(P.time * 12 + sg) * 0.8;
+        continue;
+      }
+      if (kind === 'scooter' && P.veh.grips) {
+        const g = P.veh.grips[L.side > 0 ? 0 : 1].getWorldPosition(V());
+        solveLimb(L, g, V(sg * 0.8, -0.2, -0.5).applyQuaternion(gl), null);
+        continue;
+      }
+      if (R.grabK > 0.5 && state === 'air') {
+        solveLimb(L, toW(sg * wid * 0.55, deckY + 0.03 + grabLift, sg * len * 0.18), V(sg * 0.8, 0, -0.5).applyQuaternion(gl), null);
+        continue;
+      }
+      const wide = (kind === 'blades' ? 0.3 : 0.85) + 0.5 * Math.abs(R.steer) + (state === 'air' ? 0.45 : 0) + spread * 1.3;
+      L.A.rotation.z = sg * wide;
+      L.A.rotation.x = kind === 'blades' ? sg * Math.sin(R.stroke * Math.PI * 2) * 0.5 * (R.pushing ? 1 : 0.2) : R.steer * 0.3 * sg;
+      L.B.rotation.x = -0.25;
+    }
+    vis.updateMatrixWorld(true);
+  }
+
+  function updateRideHud() {
+    if (!hud || !P) return;
+    const sc = hud.querySelector('#rideScore');
+    const cb = hud.querySelector('#rideCombo');
+    hud.querySelectorAll('[data-act^="ride:"]').forEach((b) => b.classList.toggle('on', b.dataset.act === 'ride:' + P.ride));
+    if (!sc || !cb) return;
+    const riding = P.ride !== 'walk' && P.rs;
+    sc.hidden = !riding;
+    cb.hidden = !riding;
+    if (!riding) return;
+    sc.textContent = `Score ${P.score}  ·  Best combo ${P.best}`;
+    const R = P.rs;
+    if (R.combo.length) cb.textContent = `${R.combo.map((c) => c.name).join(' + ')}   ${Math.round(R.comboPts)} × ${R.combo.length}`;
+    else if (R.lastBank && P.time - R.lastBank.t < 3) cb.textContent = `+${R.lastBank.total}!  ${R.lastBank.names}`;
+    else cb.textContent = '';
+  }
+
   // ------------------------------------------------------------------ controls
   const key = (c) => keys.has(c);
   const once = (c) => pressedOnce.delete(c);
@@ -904,6 +1485,7 @@ export function createPlay(ctx) {
     if (once('Space')) P.jumpBuf = 0.14;
     if (once('KeyE')) tryPickUp();
     if (once('KeyF')) held ? throwHeld() : tryPickUp();
+    if (once('KeyV')) cycleRide();
     if (once('KeyH') && hud) {
       const h = hud.querySelector('#playHelp');
       if (h) h.hidden = !h.hidden;
@@ -940,12 +1522,12 @@ export function createPlay(ctx) {
     const bodyFwd = fwdOf(P.yaw);
 
     // ---- stance: stand / crouch / crawl, with a headroom check
-    let want = P.crawlToggle ? 'crawl' : key('KeyC') || key('ControlLeft') ? 'crouch' : 'stand';
+    let want = P.ride !== 'walk' ? 'stand' : P.crawlToggle ? 'crawl' : key('KeyC') || key('ControlLeft') ? 'crouch' : 'stand';
     const wantHs = { stand: P.hsStand, crouch: P.hsCrouch, crawl: 0 };
-    if (want === 'stand' && !headroom(P.hsStand)) want = 'crouch';
-    if (want === 'crouch' && !headroom(P.hsCrouch)) want = 'crawl';
+    if (P.ride === 'walk' && want === 'stand' && !headroom(P.hsStand)) want = 'crouch';
+    if (P.ride === 'walk' && want === 'crouch' && !headroom(P.hsCrouch)) want = 'crawl';
     // walking toward something low (a tunnel, a beam): duck under it by yourself
-    if (P.state === 'ground' && P.grounded && mv.lengthSq() > 0.01 && want !== 'crawl') {
+    if (P.ride === 'walk' && P.state === 'ground' && P.grounded && mv.lengthSq() > 0.01 && want !== 'crawl') {
       const d = mv.clone().normalize();
       const feet = b.position.y - P.r;
       const stepMax = Math.min(0.32 * C.H, 0.6 * ws);
@@ -973,8 +1555,10 @@ export function createPlay(ctx) {
 
     // ---- ground check
     const wasGround = P.grounded;
-    const gHit = ray(V(b.position.x, b.position.y, b.position.z), V(b.position.x, b.position.y - P.r - 0.16 * ws, b.position.z));
-    P.grounded = !!gHit && gHit.normal.y > 0.55 && b.velocity.y < P.jumpV * 0.55;
+    const riding = P.ride !== 'walk';
+    const gHit = ray(V(b.position.x, b.position.y, b.position.z), V(b.position.x, b.position.y - P.r - (riding ? 0.34 : 0.16) * ws, b.position.z));
+    P.grounded = !!gHit && gHit.normal.y > (riding ? 0.2 : 0.55) && b.velocity.y < P.jumpV * (riding ? 0.6 : 0.55);
+    if (gHit) P.groundNormal.copy(gHit.normal);
     P.groundBody = gHit ? gHit.body : null;
     if (P.grounded) {
       P.coyote = 0.12;
@@ -984,7 +1568,7 @@ export function createPlay(ctx) {
     } else P.airT += dt;
 
     // ---- climbing: walk into a wall with holds
-    if (P.state !== 'climb' && P.state !== 'mantle' && P.climbCool <= 0 && fi > 0.2) {
+    if (P.ride === 'walk' && P.state !== 'climb' && P.state !== 'mantle' && P.climbCool <= 0 && fi > 0.2) {
       const hit = rayDir(V(b.position.x, b.position.y + Math.max(P.hsCur * 0.5, 0.05), b.position.z), bodyFwd, P.r + 0.55 * ws, WORLD);
       if (hit && hit.body.userData && hit.body.userData.climb && Math.abs(hit.normal.y) < 0.3) {
         P.state = 'climb';
@@ -993,16 +1577,37 @@ export function createPlay(ctx) {
         toast('Climbing! W/S up and down, A/D sideways, Space to jump off. 🧗');
       }
     }
+    // ---- wall run up: jump at a wall while running at it
+    if (P.ride === 'walk' && !P.grounded && P.state === 'air' && P.wallCool <= 0 && P.speedH > 2.8 * P.k && fi > 0) {
+      const vh = V(b.velocity.x, 0, b.velocity.z).normalize();
+      const hitF = rayDir(V(b.position.x, b.position.y + Math.max(P.hsCur * 0.5, 0.05), b.position.z), vh, P.r + 0.8 * ws, WORLD);
+      if (hitF && hitF.body.mass === 0 && Math.abs(hitF.normal.y) < 0.3 && vh.dot(hitF.normal) < -0.55) {
+        const s0 = clamp(Math.max(P.speedH, P.run * 0.8), 3, 8.5);
+        P.state = 'wallup';
+        P.wall = {
+          N: V(hitF.normal.x, 0, hitF.normal.z).normalize(),
+          side: 0, s0, speed: s0, dist: 0, phase: 0, dWall: P.r + 0.03,
+          len: clamp(1.5 * P.char.H + s0 * 0.25, 2.2, 6.5) * ws,
+          tangent: UP.clone(),
+        };
+        P.wallT = 0;
+        P.jumps = 1;
+        toast('Wall run up! Space to flip off. 🧗‍♂️');
+      }
+    }
     // ---- wall run: in the air, going fast, wall beside you
-    if (!P.grounded && P.state === 'air' && P.wallCool <= 0 && P.speedH > 2.8 * P.k) {
+    if (P.ride === 'walk' && !P.grounded && P.state === 'air' && P.wallCool <= 0 && P.speedH > 2.8 * P.k) {
       const vh = V(b.velocity.x, 0, b.velocity.z).normalize();
       const left = V().crossVectors(UP, vh);
       for (const side of [1, -1]) {
         const dir = left.clone().multiplyScalar(side);
         const hit = rayDir(V(b.position.x, b.position.y + Math.max(P.hsCur * 0.5, 0.05), b.position.z), dir, P.r + 0.8 * ws, WORLD);
         if (hit && hit.body.mass === 0 && Math.abs(hit.normal.y) < 0.3) {
+          const s0 = clamp(Math.max(P.speedH, P.run * 0.9), 3, 9);
+          const N0 = V(hit.normal.x, 0, hit.normal.z).normalize();
+          const tan0 = vh.clone().addScaledVector(N0, -vh.dot(N0)).normalize();
           P.state = 'wallrun';
-          P.wall = { N: V(hit.normal.x, 0, hit.normal.z).normalize(), side, speed: Math.max(P.speedH, P.run * 0.9) };
+          P.wall = { N: N0, side, s0, speed: s0, dist: 0, phase: 0, dWall: P.r + 0.03, len: clamp(6 + s0 * 1.1, 9, 16) * ws, tangent: tan0 };
           P.wallT = 0;
           P.jumps = 1;
           toast('Wall run! Press Space to jump off. 🏃');
@@ -1014,7 +1619,9 @@ export function createPlay(ctx) {
     // ---- state machine
     P.antiGrav = 0;
     const v = b.velocity;
-    if (P.state === 'mantle') {
+    if (P.ride !== 'walk') {
+      rideStep(dt, fi, -ri, running_);
+    } else if (P.state === 'mantle') {
       P.mantle.t += dt / 0.45;
       const t = Math.min(1, P.mantle.t);
       const e = smooth(t);
@@ -1074,30 +1681,52 @@ export function createPlay(ctx) {
           P.climbCool = 0.3;
         }
       }
-    } else if (P.state === 'wallrun') {
+    } else if (P.state === 'wallrun' || P.state === 'wallup') {
+      // A wall run has a distance. It runs steady, then slows down while gravity comes back,
+      // so you arc off the wall instead of stopping dead.
       const W = P.wall;
+      const up = P.state === 'wallup';
       P.wallT += dt;
       const into = W.N.clone().negate();
-      const hit = rayDir(V(b.position.x, b.position.y + Math.max(P.hsCur * 0.5, 0.05), b.position.z), into, P.r + 1.15 * ws, WORLD);
-      const heading = V(v.x, 0, v.z);
-      const tangent = heading.clone().addScaledVector(W.N, -heading.dot(W.N));
-      if (tangent.lengthSq() < 0.01) tangent.copy(fwdOf(P.yaw));
-      tangent.normalize();
-      W.speed = Math.max(W.speed * (1 - 0.12 * dt), 3.0);
-      P.yawTarget = Math.atan2(tangent.x, tangent.z);
-      let vy = P.wallT < 0.25 ? 3.2 : P.wallT < 1.5 ? 0.0 : -2.2;
+      const chest = V(b.position.x, b.position.y + Math.max(P.hsCur * 0.5, 0.05), b.position.z);
+      const hit = rayDir(chest, into, P.r + 1.15 * ws, WORLD);
+      const t = clamp(W.dist / W.len, 0, 1);
+      const ease = smooth(clamp((t - 0.55) / 0.45, 0, 1));
+      W.speed = W.s0 * (1 - (up ? 0.92 : 0.7) * ease);
+      let stick = V();
       if (hit) {
         const d = V(b.position.x - hit.point.x, 0, b.position.z - hit.point.z).dot(W.N);
-        v.set(tangent.x * W.speed + into.x * Math.max(0, d - (P.r + 0.02)) * 6, vy, tangent.z * W.speed + into.z * Math.max(0, d - (P.r + 0.02)) * 6);
+        W.dWall = d;
+        stick = into.clone().multiplyScalar(Math.max(0, d - (P.r + 0.02)) * 6);
       }
-      P.antiGrav = 1;
+      W.phase += W.speed * dt * (up ? 2.6 : 2.4) / Math.max(0.5, P.char.H * 0.55);
+      W.dist += W.speed * dt;
+      P.antiGrav = 1 - ease;
+      if (up) {
+        P.yawTarget = Math.atan2(into.x, into.z);
+        v.set(stick.x + into.x * 1.0, W.speed, stick.z + into.z * 1.0);
+      } else {
+        P.yawTarget = Math.atan2(W.tangent.x, W.tangent.z);
+        const vy = t < 0.12 ? 2.4 * (1 - t / 0.12) : t < 0.55 ? 0.15 : v.y;
+        v.set(W.tangent.x * W.speed + stick.x, vy, W.tangent.z * W.speed + stick.z);
+      }
       if (P.jumpBuf > 0) {
         P.jumpBuf = 0;
-        v.set(W.N.x * 7 + tangent.x * W.speed * 0.8, P.jumpV * 1.05, W.N.z * 7 + tangent.z * W.speed * 0.8);
+        if (up) v.set(W.N.x * 6, P.jumpV * 0.95, W.N.z * 6);
+        else v.set(W.N.x * 7 + W.tangent.x * W.speed * 0.8, P.jumpV * 1.05, W.N.z * 7 + W.tangent.z * W.speed * 0.8);
         P.state = 'air';
         P.wallCool = 0.4;
-      } else if (!hit || P.wallT > 2.6 || P.grounded || W.speed < 3.05 && P.wallT > 0.6) {
-        P.state = P.grounded ? 'ground' : 'air';
+      } else if (t >= 1 || !hit || (P.grounded && P.wallT > 0.25)) {
+        // out of run: peel off the wall in an arc (or grab on, if it is a climbing wall)
+        if (up && hit && hit.body.userData && hit.body.userData.climb) {
+          P.state = 'climb';
+          P.climbN = W.N.clone();
+          P.wallDist = P.r + 0.03;
+        } else {
+          v.x += W.N.x * (up ? 2.5 : 0.8);
+          v.z += W.N.z * (up ? 2.5 : 0.8);
+          P.state = P.grounded ? 'ground' : 'air';
+        }
         P.wallCool = 0.5;
       }
     } else {
@@ -1214,20 +1843,23 @@ export function createPlay(ctx) {
     const hit = ray(target, want);
     if (hit) want.copy(target).addScaledVector(want.clone().sub(target).normalize(), Math.max(0.5, hit.distance - 0.25));
     camPos.lerp(want, 1 - Math.exp(-18 * dt));
+    if (P.ride !== 'walk' && P.rs && P.speedH > 1.5 && !key('ArrowLeft') && !key('ArrowRight') && P.state !== 'bail') camYaw += angleDiff(P.rs.heading, camYaw) * (1 - Math.exp(-1.6 * dt));
     camera.position.copy(camPos);
     camera.lookAt(target);
     sun.position.set(p.x + 20, 40, p.z + 14);
     sun.target.position.set(p.x, 0, p.z);
     sun.target.updateMatrixWorld();
   }
-  const STATE_NAMES = { ground: 'On the ground', air: 'In the air', climb: 'Climbing 🧗', wallrun: 'Wall run 🏃', mantle: 'Pulling up…' };
+  const STATE_NAMES = { grind: 'Grinding 🔩', bail: 'Bail! 😵', ground: 'On the ground', air: 'In the air', climb: 'Climbing 🧗', wallrun: 'Wall run 🏃', wallup: 'Wall run up 🧗‍♂️', mantle: 'Pulling up…' };
   function updateHud() {
     if (!hud || !P) return;
     const el = hud.querySelector('#playState');
     if (!el) return;
     let t = STATE_NAMES[P.state] || P.state;
-    if (P.state === 'ground') t = P.stance === 'crawl' ? 'Crawling 🐛' : P.stance === 'crouch' ? 'Crouching' : P.speedH > P.walk * 1.3 ? 'Running 💨' : P.speedH > 0.4 ? 'Walking' : 'Standing';
+    if (P.ride !== 'walk' && P.state === 'ground') t = P.speedH > 0.4 ? `${RIDES[P.ride].icon} Rolling` : `${RIDES[P.ride].icon} Ready`;
+    else if (P.state === 'ground') t = P.stance === 'crawl' ? 'Crawling 🐛' : P.stance === 'crouch' ? 'Crouching' : P.speedH > P.walk * 1.3 ? 'Running 💨' : P.speedH > 0.4 ? 'Walking' : 'Standing';
     if (held) t += ' · holding something';
+    updateRideHud();
     if (P.charge > 0 && held) t += ` · throw power ${'▮'.repeat(Math.min(8, Math.ceil((P.charge / 1.2) * 8)))}`;
     if (el.textContent !== t) el.textContent = t;
   }
@@ -1344,7 +1976,7 @@ export function createPlay(ctx) {
     for (let i = 0; i < n; i++) update(dt);
   }
   return {
-    start, stop, frame, resize, setCharacter, tick,
+    start, stop, frame, resize, setCharacter, setRide, tick,
     get running() { return running; },
     get character() { return charId; },
     debug: {
@@ -1353,6 +1985,8 @@ export function createPlay(ctx) {
       keys, pressedOnce,
       get props() { return props; },
       get held() { return held; },
+      get ws() { return ws; },
+      get rails() { return rails; },
       get camYaw() { return camYaw; },
       set camYaw(v) { camYaw = v; },
       spawnMyModel, spawnBox,
