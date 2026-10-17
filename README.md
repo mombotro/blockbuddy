@@ -54,7 +54,7 @@ Tricks stack into a combo. Land clean to bank it (points × number of tricks); l
 - **City:** a block city of climbable buildings (walk into any wall to climb, mantle onto the roof), alleys for wall running, sky bridges, launch pads, a plaza with stairs / rail / ledge / quarter pipe, and sedans on the streets.
 - **Zones:** the Go to menu section (or `Y`) jumps to the start, skate park, city or target range. `T` goes home.
 - **Driving:** walk up to a car, kart, truck or hovercraft and press `E`. `W`/`S` gas and reverse, `A`/`D` steer, `Space` brake (hop for the hovercraft), `Shift` boost, `U` flip upright, `E` get out. The **Cars** section spawns more.
-- **Riding animals:** the **Ride an animal** section (Horse, Dog, Cat, My animal). You become the animal (it runs, jumps and climbs as it always does) with your old character sitting on its back. **Get off** hops down.
+- **Riding animals:** the **Ride an animal** section (Horse, Dog, Cat, My animal). You become the animal (it runs, jumps and climbs as it always does) with your old character (person, dog, cat, your own model, whatever you were) sitting on its back. **Get off** hops down.
 - **Add your own files:** **📂 Add my saved model…** (or drag a `.json` onto the picture) drops a saved BlockBuddy model into the playground. Small models are toys, huge ones are solid and climbable, and models marked below do their job.
 
 ### ⚙️ "What can it do?" (in the editor, left panel)

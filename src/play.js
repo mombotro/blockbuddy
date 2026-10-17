@@ -1770,13 +1770,13 @@ export function createPlay(ctx) {
 
   // ------------------------------------------------------------------ riding animals
   // You swap into the animal (it runs, jumps, climbs like it always does) and your old
-  // character appears sitting on its back.
+  // character (whatever it was: person, dog, cat, your own model) sits on its back.
   function attachRider(riderId) {
     const C = P.char;
     if (!C.quad || !C.spine || !C.saddleLocal) return toast("That animal can't carry a rider. 🐾");
     let src = characterSource(riderId);
     let R = src ? buildCharacter(src) : null;
-    if (!R || !R.biped) {
+    if (!R) {
       riderId = 'person';
       R = buildCharacter(characterSource('person'));
     }
