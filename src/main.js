@@ -40,7 +40,17 @@ import {
   isInside,
 } from './nodes.js';
 import { STARTERS, posesFor } from './rigs.js';
-import { buildTopology, extrudeFaces, extrudeEdge, ensureFaces, keyOf } from './editmesh.js';
+import {
+  buildTopology,
+  extrudeFaces,
+  extrudeEdge,
+  ensureFaces,
+  keyOf,
+  edgeLoop,
+  faceLoop,
+  deleteFaces,
+  insetFaces,
+} from './editmesh.js';
 
 const $ = (s) => document.querySelector(s);
 const PALETTE = [
@@ -391,10 +401,12 @@ transform.addEventListener('dragging-changed', (e) => {
   if (e.value) onDragStart();
   else onDragEnd();
 });
-transform.addEventListener('objectChange', onObjectChange);
+transform.addEventListener('objectChange', () => onObjectChange());
 
 function onDragStart() {
-  const o = transform.object;
+  beginDrag(transform.object);
+}
+function beginDrag(o) {
   drag = { obj: o };
   if (o && isJoint(o) && state.mode === 'build') drag.held = kids(o).map((k) => [k, worldOf(k)]);
   if (o === pivot && pts) {
@@ -402,8 +414,7 @@ function onDragStart() {
     drag.pts = { C: pivot.position.clone(), W0: selGroups().map((gi) => [gi, pts.part.localToWorld(posOf(gi))]) };
   }
 }
-function onObjectChange() {
-  const o = transform.object;
+function onObjectChange(o = transform.object) {
   if (!o) return;
   if (o === pivot) return onPivotChange();
   if (state.mode === 'pose') return;
@@ -418,11 +429,12 @@ function onPivotChange() {
   const part = pts.part;
   part.updateWorldMatrix(true, false);
   const { C, W0 } = drag.pts;
+  const kind = drag.kind || state.pgizmo;
   const a = part.geometry.attributes.position;
   const w = new THREE.Vector3();
   for (const [gi, W] of W0) {
-    if (state.pgizmo === 'turn') w.copy(W).sub(C).applyQuaternion(pivot.quaternion).add(C);
-    else if (state.pgizmo === 'size') w.copy(W).sub(C).multiply(pivot.scale).add(C);
+    if (kind === 'turn') w.copy(W).sub(C).applyQuaternion(pivot.quaternion).add(C);
+    else if (kind === 'size') w.copy(W).sub(C).multiply(pivot.scale).add(C);
     else w.copy(W).add(pivot.position).sub(C);
     const l = part.worldToLocal(w.clone());
     for (const i of pts.topo.groups[gi]) a.setXYZ(i, l.x, l.y, l.z);
@@ -450,6 +462,175 @@ function onDragEnd() {
   commit();
 }
 
+// ---------------------------------------------------------------- Blender-style G / R / S
+// G = grab (move), R = rotate, S = scale. Then X / Y / Z locks an axis, or type a number
+// for an exact amount. Click or Enter accepts. Esc or right-click cancels.
+const AXES = { x: new THREE.Vector3(1, 0, 0), y: new THREE.Vector3(0, 1, 0), z: new THREE.Vector3(0, 0, 1) };
+const mouse = { x: 0, y: 0 };
+let modal = null;
+window.addEventListener('pointermove', (e) => {
+  mouse.x = e.clientX;
+  mouse.y = e.clientY;
+  if (modal) modalUpdate();
+});
+const mray = new THREE.Raycaster();
+function rayAt(pt) {
+  const r = canvas.getBoundingClientRect();
+  mray.setFromCamera(new THREE.Vector2(((pt.x - r.left) / r.width) * 2 - 1, -((pt.y - r.top) / r.height) * 2 + 1), camera);
+  return mray.ray.clone();
+}
+function planePoint(P0, ray) {
+  const plane = new THREE.Plane().setFromNormalAndCoplanarPoint(camera.getWorldDirection(new THREE.Vector3()), P0);
+  return ray.intersectPlane(plane, new THREE.Vector3());
+}
+// where along the line (P0 + s*u) is closest to the mouse ray
+function lineParam(P0, u, ray) {
+  const w0 = P0.clone().sub(ray.origin);
+  const v = ray.direction;
+  const b = u.dot(v);
+  const den = 1 - b * b;
+  return den < 1e-4 ? 0 : (b * v.dot(w0) - u.dot(w0)) / den;
+}
+function screenOf(P) {
+  const r = canvas.getBoundingClientRect();
+  const v = P.clone().project(camera);
+  return { x: r.left + ((v.x + 1) / 2) * r.width, y: r.top + ((1 - v.y) / 2) * r.height };
+}
+const snapV = (v) => (state.snap ? Math.round(v / 0.05) * 0.05 : v);
+const KIND_NAME = { move: 'Move', turn: 'Rotate', size: 'Scale' };
+
+function startModal(kind) {
+  if (modal || state.mode !== 'build' || state.sticking) return;
+  const n = state.selected;
+  let tgt = null;
+  if (state.tool === 'points' && n && isPart(n)) tgt = pts && psel.length ? 'elements' : null;
+  else if (n && isPart(n)) tgt = 'part';
+  else if (n && isJoint(n) && kind === 'move') tgt = 'joint';
+  if (!tgt) return;
+  const obj = tgt === 'elements' ? pivot : n;
+  beginDrag(obj);
+  drag.kind = kind;
+  modal = {
+    kind,
+    tgt,
+    obj,
+    axis: null,
+    num: '',
+    label: '',
+    start: { x: mouse.x, y: mouse.y },
+    P0: tgt === 'elements' ? pivot.position.clone() : worldPos(obj),
+    p0: obj.position.clone(),
+    q0: obj.quaternion.clone(),
+    s0: obj.scale.clone(),
+  };
+  transform.enabled = false;
+  transform.getHelper().visible = false;
+  orbit.enabled = false;
+  modalUpdate();
+}
+function modalUpdate() {
+  const m = modal;
+  const ax = m.axis ? AXES[m.axis] : null;
+  const num = m.num !== '' && !isNaN(parseFloat(m.num)) ? parseFloat(m.num) : null;
+  const T = new THREE.Vector3();
+  const Q = new THREE.Quaternion();
+  const S = new THREE.Vector3(1, 1, 1);
+  const view = camera.getWorldDirection(new THREE.Vector3());
+  let readout;
+  if (m.kind === 'move') {
+    if (num !== null) T.copy(ax || AXES.x).multiplyScalar(num);
+    else if (ax) T.copy(ax).multiplyScalar(snapV(lineParam(m.P0, ax, rayAt(mouse)) - lineParam(m.P0, ax, rayAt(m.start))));
+    else {
+      const a = planePoint(m.P0, rayAt(mouse));
+      const b = planePoint(m.P0, rayAt(m.start));
+      if (a && b) T.copy(a).sub(b);
+      T.set(snapV(T.x), snapV(T.y), snapV(T.z));
+    }
+    readout = `${T.x.toFixed(2)}, ${T.y.toFixed(2)}, ${T.z.toFixed(2)}`;
+  } else if (m.kind === 'turn') {
+    let ang;
+    if (num !== null) ang = THREE.MathUtils.degToRad(num);
+    else {
+      const sp = screenOf(m.P0);
+      ang = Math.atan2(mouse.y - sp.y, mouse.x - sp.x) - Math.atan2(m.start.y - sp.y, m.start.x - sp.x);
+      if (ang > Math.PI) ang -= 2 * Math.PI;
+      if (ang < -Math.PI) ang += 2 * Math.PI;
+      if (ax && ax.dot(view) < 0) ang = -ang; // keep the turn matching the mouse as seen on screen
+      if (state.snap) ang = Math.round(ang / THREE.MathUtils.degToRad(15)) * THREE.MathUtils.degToRad(15);
+    }
+    Q.setFromAxisAngle(ax || view, ang);
+    readout = `${THREE.MathUtils.radToDeg(ang).toFixed(0)}°`;
+  } else {
+    let f;
+    if (num !== null) f = num;
+    else {
+      const sp = screenOf(m.P0);
+      f = Math.hypot(mouse.x - sp.x, mouse.y - sp.y) / Math.max(20, Math.hypot(m.start.x - sp.x, m.start.y - sp.y));
+      if (state.snap) f = Math.round(f * 20) / 20;
+    }
+    f = Math.max(0.01, f);
+    if (ax) S.setComponent('xyz'.indexOf(m.axis), f);
+    else S.setScalar(f);
+    readout = `×${f.toFixed(2)}`;
+  }
+  m.label = `${KIND_NAME[m.kind]}${m.axis ? ' ' + m.axis.toUpperCase() : ''}: ${m.num !== '' ? m.num : readout}`;
+  applyModal(T, Q, S);
+  renderToolbar();
+}
+function applyModal(T, Q, S) {
+  const m = modal;
+  const o = m.obj;
+  if (m.tgt === 'elements') {
+    pivot.position.copy(m.P0).add(T);
+    pivot.quaternion.copy(Q);
+    pivot.scale.copy(S);
+    return onPivotChange();
+  }
+  const pq = o.parent.getWorldQuaternion(new THREE.Quaternion());
+  const pqi = pq.clone().invert();
+  o.position.copy(m.p0).add(T.clone().applyQuaternion(pqi));
+  if (m.kind === 'turn') o.quaternion.copy(pqi).multiply(Q).multiply(pq).multiply(m.q0);
+  if (m.kind === 'size') o.scale.copy(m.s0).multiply(S);
+  onObjectChange(o);
+}
+function endModal(ok) {
+  const m = modal;
+  modal = null;
+  transform.enabled = true;
+  transform.getHelper().visible = true;
+  orbit.enabled = true;
+  if (ok) onDragEnd();
+  else {
+    if (m.tgt === 'elements') {
+      pivot.position.copy(m.P0);
+      pivot.quaternion.identity();
+      pivot.scale.set(1, 1, 1);
+      onPivotChange();
+    } else {
+      m.obj.position.copy(m.p0);
+      m.obj.quaternion.copy(m.q0);
+      m.obj.scale.copy(m.s0);
+      onObjectChange(m.obj);
+    }
+    drag = null;
+  }
+  refresh();
+}
+function modalKey(e) {
+  e.preventDefault();
+  const c = e.code;
+  if (c === 'Escape') return endModal(false);
+  if (c === 'Enter' || c === 'NumpadEnter') return endModal(true);
+  if (c === 'KeyX' || c === 'KeyY' || c === 'KeyZ') {
+    const a = c.slice(3).toLowerCase();
+    modal.axis = modal.axis === a ? null : a;
+  } else if (/^(Digit|Numpad)\d$/.test(c)) modal.num += c.slice(-1);
+  else if (c === 'Period' || c === 'NumpadDecimal') modal.num += modal.num.includes('.') ? '' : '.';
+  else if (c === 'Minus' || c === 'NumpadSubtract') modal.num = modal.num.startsWith('-') ? modal.num.slice(1) : '-' + modal.num;
+  else if (c === 'Backspace') modal.num = modal.num.slice(0, -1);
+  modalUpdate();
+}
+
 // ---------------------------------------------------------------- picking
 const ray = new THREE.Raycaster();
 const ptr = new THREE.Vector2();
@@ -465,6 +646,12 @@ $('#stage').appendChild(marqueeEl);
 canvas.addEventListener(
   'pointerdown',
   (e) => {
+    if (modal) {
+      e.stopImmediatePropagation();
+      e.preventDefault();
+      down = null;
+      return e.button === 2 ? endModal(false) : e.button === 0 ? endModal(true) : undefined;
+    }
     if (!e.shiftKey || e.button !== 0 || state.tool !== 'points' || state.mode !== 'build' || !pts || transform.axis) return;
     e.stopImmediatePropagation();
     down = null;
@@ -536,6 +723,7 @@ function pick(e) {
   }
   if (state.tool === 'points' && state.mode === 'build' && pts) {
     const hit = ray.intersectObjects(pts.handles, false)[0];
+    if (hit && e.altKey) return loopSelect(hit.object.userData.pel, e.shiftKey);
     if (hit) return selectEls([hit.object.userData.pel], e.shiftKey);
     if (state.emode === 'face') {
       // click right on a face of the shape
@@ -543,7 +731,7 @@ function pick(e) {
       if (sh) {
         const id = pts.part.geometry.attributes.face.getX(sh.faceIndex * 3);
         const idx = pts.els.findIndex((f) => f.id === id);
-        if (idx >= 0) return selectEls([idx], e.shiftKey);
+        if (idx >= 0) return e.altKey ? loopSelect(idx, e.shiftKey) : selectEls([idx], e.shiftKey);
       }
     }
   }
@@ -625,6 +813,97 @@ function cancelStick() {
   applyBoneVisibility();
   refresh();
 }
+// ---------------------------------------------------------------- select loops / rings, delete, inset
+const surfaceHit = () => pts.part && ray.intersectObject(pts.part, false)[0];
+// Alt+click: an edge picks its whole edge loop, a face picks its belt of faces
+function loopSelect(i, add) {
+  const topo = pts.topo;
+  const sh = surfaceHit();
+  if (state.emode === 'edge') {
+    const pf = sh ? pts.part.geometry.attributes.face.getX(sh.faceIndex * 3) : null;
+    return selectEls(edgeLoop(topo, i, pf), add);
+  }
+  if (state.emode === 'face') {
+    const f = pts.els[i];
+    const pt = sh ? pts.part.worldToLocal(sh.point.clone()) : elCenter(f);
+    let best = -1;
+    let bd = Infinity;
+    for (const ei of topo.faceEdges.get(f.id) || []) {
+      const [a, b] = topo.edges[ei].gs;
+      const d = new THREE.Line3(posOf(a), posOf(b)).closestPointToPoint(pt, true, new THREE.Vector3()).distanceTo(pt);
+      if (d < bd) {
+        bd = d;
+        best = ei;
+      }
+    }
+    if (best < 0) return selectEls([i], add);
+    return selectEls(faceLoop(topo, f.id, best).map((id) => topo.faceIndex.get(id)), add);
+  }
+  toast('Alt+click works on edges and faces. For dots, use the ring buttons.');
+}
+function selectAll() {
+  if (pts) selectEls(pts.els.map((_, i) => i), false);
+}
+function selectNone() {
+  if (pts) selectEls([], false);
+}
+function selectFlip() {
+  if (pts) selectEls(pts.els.map((_, i) => i).filter((i) => !psel.includes(i)), false);
+}
+// everything on the same level as the last pick (axis 0/1/2 = width/height/depth)
+function ringSelect(axis) {
+  if (!pts || !psel.length) return toast('Pick a dot, edge or face first, then pick its ring. ◯');
+  const comp = (v) => [v.x, v.y, v.z][axis];
+  const level = comp(elCenter(pts.els[psel[psel.length - 1]]));
+  const idx = [];
+  pts.els.forEach((el, i) => {
+    const on = state.emode === 'face' ? Math.abs(comp(elCenter(el)) - level) < 0.002 : el.gs.every((gi) => Math.abs(comp(posOf(gi)) - level) < 0.002);
+    if (on) idx.push(i);
+  });
+  selectEls(idx.filter((i) => !psel.includes(i)), true); // add, never un-pick
+  toast(`${idx.length} on that ring`);
+}
+function setMesh(part, res) {
+  const ng = new THREE.BufferGeometry();
+  ng.setAttribute('position', new THREE.BufferAttribute(res.position, 3));
+  ng.setAttribute('face', new THREE.BufferAttribute(res.face, 1));
+  refreshGeometry(ng, part.userData.texScale);
+  part.geometry.dispose();
+  part.geometry = ng;
+  syncTwin(part, true);
+  commit(); // rebuilds the handles
+}
+function selFaceIds() {
+  const ids = new Set();
+  for (const i of psel) {
+    const el = pts.els[i];
+    if (state.emode === 'face') ids.add(el.id);
+    else if (state.emode === 'edge') el.faces.forEach((id) => ids.add(id));
+    else pts.topo.faces.forEach((f) => f.gs.includes(el.gs[0]) && ids.add(f.id));
+  }
+  return ids;
+}
+function reselectFaces(ids) {
+  if (pts && state.emode === 'face') selectEls(pts.els.map((el, i) => (ids.has(el.id) ? i : -1)).filter((i) => i >= 0), false);
+}
+function deleteSel() {
+  if (!pts || !psel.length) return toast('Pick something to delete first.');
+  const ids = selFaceIds();
+  const res = deleteFaces(pts.part.geometry, ids);
+  if (!res) return toast("That would delete the whole shape. Use Delete on the whole part instead.");
+  setMesh(pts.part, res);
+  toast(`Deleted ${ids.size} face${ids.size === 1 ? '' : 's'}.`);
+}
+function insetSel() {
+  if (!pts || state.emode !== 'face' || !psel.length) return toast('Inset works on faces ▣. Pick a face first.');
+  const ids = new Set(psel.map((i) => pts.els[i].id));
+  const res = insetFaces(pts.part.geometry, ids, 0.3);
+  if (!res) return;
+  setMesh(pts.part, res);
+  reselectFaces(ids);
+  toast('Inset! Now Extrude it for a window or a button. ⬆️');
+}
+
 // Extrude: push picked faces out (with side walls), or pull a flap out of one edge.
 function extrudeSel() {
   if (!pts || !psel.length) return toast('Pick a face or an edge first! ▣');
@@ -791,7 +1070,13 @@ function applyPose(i) {
 }
 function applyBoneVisibility() {
   flags.bones = state.mode === 'pose' || state.bonesUser || !!state.sticking;
-  for (const j of jointsList()) if (j.userData.marker) j.userData.marker.visible = flags.bones;
+  // small animals get small bone dots
+  const dot = { cat: 0.5, bird: 0.7 }[state.rig] || 1;
+  for (const j of jointsList())
+    if (j.userData.marker) {
+      j.userData.marker.visible = flags.bones;
+      j.userData.marker.scale.setScalar(dot);
+    }
 }
 
 // ---------------------------------------------------------------- export / save / load
@@ -948,7 +1233,9 @@ function renderToolbar() {
   const n = state.selected;
   const el = $('#toolbar');
   let html = '';
-  if (state.sticking) {
+  if (modal) {
+    html = `<span class="label full" style="font-size:15px">${esc(modal.label)} · X Y Z = axis · type a number · click or Enter = OK · Esc = cancel</span>`;
+  } else if (state.sticking) {
     const p = byId(state.sticking);
     html = `<span class="label">📎 Click what to stick “${esc(p ? p.name : '')}” onto (a shape or an orange bone)</span><button data-act="cancelstick">Cancel</button>`;
   } else if (state.mode === 'pose') {
@@ -1013,6 +1300,18 @@ function renderRight() {
   const u = n.userData;
   const t = twinOf(n);
   const par = isNode(n.parent) ? n.parent : null;
+  const mini = 'class="mini" style="font-size:13px"';
+  const editBox =
+    state.tool === 'points'
+      ? `<div class="sec"><b>Pick ✋</b>
+      <div class="grid3"><button ${mini} data-act="selall" title="A">All</button><button ${mini} data-act="selnone" title="Alt+A">None</button><button ${mini} data-act="selinv" title="Ctrl+I">Flip</button></div>
+      <p class="tip small">Pick everything on the same level as your last pick:</p>
+      <div class="grid3"><button ${mini} data-act="selring:1">↕ Height</button><button ${mini} data-act="selring:0">↔ Width</button><button ${mini} data-act="selring:2">⤢ Depth</button></div>
+      <p class="tip small">Alt+click an edge = its loop. Alt+click a face = its belt of faces.</p></div>
+      <div class="sec"><b>Edit ✏️</b>
+      <div class="grid3"><button ${mini} data-act="extrude">⬆ Extrude</button><button ${mini} data-act="inset">⬇ Inset</button><button ${mini} data-act="delsel">🗑 Delete</button></div>
+      <p class="tip small">G move · R turn · S size, like Blender. Then X / Y / Z to lock an axis, or type a number. Press ? for all keys.</p></div>`
+      : '';
   const swatch = PALETTE.map(
     (c) => `<button class="sw ${u.color.toLowerCase() === c ? 'on' : ''}" style="background:${c}" data-act="color:${c}" title="${c}"></button>`,
   ).join('');
@@ -1021,7 +1320,7 @@ function renderRight() {
       `<button class="pat ${!u.image && u.pattern === id ? 'on' : ''}" data-act="pat:${id}" title="${label}"><img src="${patternThumb(id)}" alt=""><i>${label}</i></button>`,
   ).join('');
   el.innerHTML = `
-    <h3>Selected</h3>
+    <h3>Selected</h3>${editBox}
     <input id="nameIn" value="${esc(n.name)}" maxlength="40">
     <div class="sec"><b>Shape</b><div class="grid6">${SHAPES.map(
       ([id, label, icon]) =>
@@ -1105,6 +1404,15 @@ document.addEventListener('click', (e) => {
       state.pgizmo = arg;
       return refresh();
     case 'extrude': return extrudeSel();
+    case 'inset': return insetSel();
+    case 'delsel': return deleteSel();
+    case 'selall': return selectAll();
+    case 'selnone': return selectNone();
+    case 'selinv': return selectFlip();
+    case 'selring': return ringSelect(+arg);
+    case 'keys':
+      $('#keys').hidden = !$('#keys').hidden;
+      return;
     case 'mirror': return makeMirror();
     case 'unlink':
       if (n) unlink(n);
@@ -1181,30 +1489,48 @@ document.addEventListener('change', (e) => {
     e.target.value = '';
   }
 });
+const NUMPAD_VIEWS = { Numpad1: 'front', Numpad3: 'side', Numpad7: 'top' };
 window.addEventListener('keydown', (e) => {
   if (/input|textarea/i.test(document.activeElement.tagName) && document.activeElement.type !== 'checkbox') return;
+  if (modal) return modalKey(e);
   const mod = e.metaKey || e.ctrlKey;
-  if (mod && e.key.toLowerCase() === 'z') {
+  const c = e.code;
+  const n = state.selected;
+  const editing = state.mode === 'build' && state.tool === 'points' && n && isPart(n);
+  if (mod && c === 'KeyZ') {
     e.preventDefault();
     e.shiftKey ? redo() : undo();
-  } else if (mod && e.key.toLowerCase() === 'y') {
+  } else if (mod && c === 'KeyY') {
     e.preventDefault();
     redo();
-  } else if (e.key === 'Delete' || e.key === 'Backspace') state.tool !== 'points' && del();
-  else if (e.key === 'Escape') (state.sticking ? cancelStick() : select(null));
-  else if (state.mode === 'build' && state.tool === 'points' && state.selected && !mod && 'mtse123p'.includes(e.key.toLowerCase())) {
-    const key = e.key.toLowerCase();
-    if (key === 'e') extrudeSel();
-    else if ('123'.includes(key)) state.emode = ['dot', 'edge', 'face'][+key - 1];
-    else if (key !== 'p') state.pgizmo = { m: 'move', t: 'turn', s: 'size' }[key];
+  } else if (NUMPAD_VIEWS[c]) viewFrom(VIEWS[mod && c === 'Numpad1' ? 'back' : NUMPAD_VIEWS[c]]);
+  else if (c === 'NumpadDecimal') frameModel();
+  else if (c === 'Escape') state.sticking ? cancelStick() : select(null);
+  else if (e.key === '?') $('#keys').hidden = !$('#keys').hidden;
+  else if (state.mode !== 'build') return;
+  else if (editing && mod && c === 'KeyI') {
+    e.preventDefault();
+    selectFlip();
+  } else if (editing && e.altKey && c === 'KeyA') selectNone();
+  else if (mod) return;
+  else if (c === 'Tab' && n && isPart(n)) {
+    e.preventDefault();
+    state.tool = editing ? 'move' : 'points';
     refresh();
-  } else if (state.mode === 'build' && state.selected && isPart(state.selected)) {
-    const k = { m: 'move', t: 'turn', s: 'size', p: 'points' }[e.key.toLowerCase()];
-    if (k && !mod) {
-      state.tool = k;
+  } else if (c === 'KeyG' || c === 'KeyR' || c === 'KeyS') startModal({ KeyG: 'move', KeyR: 'turn', KeyS: 'size' }[c]);
+  else if (editing) {
+    if (c === 'KeyE') extrudeSel();
+    else if (c === 'KeyI') insetSel();
+    else if (c === 'KeyA') selectAll();
+    else if (c === 'KeyX' || e.key === 'Delete' || e.key === 'Backspace') deleteSel();
+    else if (c === 'Digit1' || c === 'Digit2' || c === 'Digit3') {
+      state.emode = ['dot', 'edge', 'face'][+c.slice(-1) - 1];
       refresh();
     }
-  }
+  } else if (n && isPart(n) && c === 'KeyD' && e.shiftKey) {
+    duplicate();
+    startModal('move');
+  } else if (c === 'KeyX' || e.key === 'Delete' || e.key === 'Backspace') del();
 });
 
 // ---------------------------------------------------------------- loop

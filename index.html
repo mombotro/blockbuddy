@@ -68,6 +68,10 @@
   .tool { display: flex; flex-direction: column; align-items: center; min-width: 62px; padding: 6px 8px; font-size: 13px; }
   .label.full { flex-basis: 100%; text-align: center; padding: 0 8px 2px; font-size: 13px; }
   .tool span { font-size: 24px; line-height: 1.1; }
+  #keys { position: absolute; right: 10px; top: 10px; width: 330px; max-height: calc(100% - 90px); overflow: auto; background: var(--panel); border: 2px solid var(--line); border-radius: 18px; padding: 12px 14px; box-shadow: 0 6px 24px rgba(40,20,100,.18); font-size: 13px; }
+  #keys[hidden] { display: none; }
+  #keys p { margin: 8px 0; }
+  kbd { background: var(--bg); border: 2px solid var(--line); border-bottom-width: 3px; border-radius: 7px; padding: 0 5px; font: inherit; font-size: 12px; }
   #marquee { position: absolute; border: 2px dashed var(--brand); background: rgba(124,92,255,.15); pointer-events: none; border-radius: 4px; }
   #marquee[hidden] { display: none; }
   .sep { width: 2px; align-self: stretch; background: var(--line); margin: 2px 2px; }
@@ -113,8 +117,16 @@
       <button data-act="view:back">Back</button><button data-act="view:top">Top</button>
       <button data-act="frame" title="Zoom to fit">🔍 Fit</button>
       <button data-act="spin" title="Spin around">🌀 Spin</button>
+      <button data-act="keys" title="Keyboard shortcuts (?)">⌨️ Keys</button>
     </div>
     <div id="toolbar"></div>
+    <div id="keys" hidden>
+      <h3>Keys <button data-act="keys" class="mini" style="float:right;font-size:13px">✕</button></h3>
+      <p><b>Anywhere</b><br><kbd>G</kbd> move · <kbd>R</kbd> rotate · <kbd>S</kbd> scale. Then <kbd>X</kbd> <kbd>Y</kbd> <kbd>Z</kbd> lock an axis, type a number for an exact amount, click or <kbd>Enter</kbd> to accept, <kbd>Esc</kbd> to cancel.</p>
+      <p><kbd>Tab</kbd> edit points on/off · <kbd>Shift</kbd>+<kbd>D</kbd> copy · <kbd>X</kbd> delete · <kbd>Ctrl/⌘</kbd>+<kbd>Z</kbd> undo · <kbd>Shift</kbd>+<kbd>Ctrl/⌘</kbd>+<kbd>Z</kbd> redo</p>
+      <p><b>Editing points</b><br><kbd>1</kbd> dots · <kbd>2</kbd> edges · <kbd>3</kbd> faces<br><kbd>A</kbd> all · <kbd>Alt</kbd>+<kbd>A</kbd> none · <kbd>Ctrl</kbd>+<kbd>I</kbd> flip<br><kbd>Shift</kbd>+click or +drag = pick more · <kbd>Alt</kbd>+click edge/face = loop<br><kbd>E</kbd> extrude · <kbd>I</kbd> inset · <kbd>X</kbd> delete faces</p>
+      <p><b>Camera</b><br>left-drag spin · right-drag slide · scroll zoom<br>numpad <kbd>1</kbd> front · <kbd>3</kbd> side · <kbd>7</kbd> top · <kbd>Ctrl</kbd>+<kbd>1</kbd> back · <kbd>.</kbd> fit</p>
+    </div>
     <div id="welcome" class="hidden"></div>
   </main>
   <aside id="right"></aside>

@@ -123,9 +123,22 @@ export function buildTopology(g) {
   }
   const faces = [...faceMap.values()].map((f) => ({ id: f.id, tris: f.tris, gs: [...f.gs] }));
   // edges between faces, or on the rim of a face. Lines inside one face don't count.
-  const edges = [...edgeMap.values()].filter((e) => e.ids.size > 1 || e.count === 1).map((e) => ({ gs: [e.a, e.b] }));
+  const edges = [...edgeMap.values()]
+    .filter((e) => e.ids.size > 1 || e.count === 1)
+    .map((e) => ({ gs: [e.a, e.b], faces: [...e.ids] }));
   const dots = groups.map((_, gi) => ({ gs: [gi] }));
-  return { groups, groupOf, keyToGroup, dots, edges, faces };
+  const edgesAt = groups.map(() => []);
+  const faceEdges = new Map();
+  edges.forEach((e, i) => {
+    edgesAt[e.gs[0]].push(i);
+    edgesAt[e.gs[1]].push(i);
+    for (const id of e.faces) {
+      if (!faceEdges.has(id)) faceEdges.set(id, []);
+      faceEdges.get(id).push(i);
+    }
+  });
+  const faceIndex = new Map(faces.map((f, i) => [f.id, i]));
+  return { groups, groupOf, keyToGroup, dots, edges, faces, edgesAt, faceEdges, faceIndex };
 }
 export const keyOf = (v) => `${Math.round(v.x * 1000)},${Math.round(v.y * 1000)},${Math.round(v.z * 1000)}`;
 
@@ -213,5 +226,131 @@ export function extrudeEdge(g, pa, pb, dist) {
     new Float32Array(6).fill(id),
   );
   out.keys = [keyOf(a2), keyOf(b2)];
+  return out;
+}
+
+// ---------------------------------------------------------------- loops and rings
+// Edge loop: from a clicked edge keep going straight through every 4-way corner
+// (the edge that shares no face with the one we came in on). At a 3-way corner,
+// like a cube's, follow the outline of `preferFace` instead. Poles end the loop.
+export function edgeLoop(topo, e0, preferFace) {
+  const E = topo.edges;
+  const out = new Set([e0]);
+  const walk = (v0) => {
+    let v = v0;
+    let e = e0;
+    let face = preferFace;
+    for (let guard = 0; guard < 5000; guard++) {
+      const here = topo.edgesAt[v];
+      const cand = here.filter((i) => i !== e);
+      let next;
+      if (here.length === 4) {
+        const used = new Set(E[e].faces);
+        next = cand.find((i) => !E[i].faces.some((f) => used.has(f)));
+      } else if (here.length === 3) {
+        if (!E[e].faces.includes(face)) face = E[e].faces[0];
+        next = cand.find((i) => E[i].faces.includes(face));
+      }
+      if (next === undefined || out.has(next)) break;
+      out.add(next);
+      v = E[next].gs[0] === v ? E[next].gs[1] : E[next].gs[0];
+      e = next;
+    }
+  };
+  walk(E[e0].gs[0]);
+  walk(E[e0].gs[1]);
+  return [...out];
+}
+
+// Face loop: a belt of four-sided faces. Start on face `f0` and cross edge `via`;
+// the belt runs through that edge and the edge opposite it.
+export function faceLoop(topo, f0, via) {
+  const E = topo.edges;
+  const chain = new Set([f0]);
+  const touches = (a, b) => E[a].gs.some((g) => E[b].gs.includes(g));
+  const go = (face, entry) => {
+    let cur = face;
+    let ein = entry;
+    for (let guard = 0; guard < 5000; guard++) {
+      const fe = topo.faceEdges.get(cur) || [];
+      if (fe.length !== 4) break;
+      const eout = fe.find((i) => i !== ein && !touches(i, ein));
+      if (eout === undefined) break;
+      const nxt = E[eout].faces.find((id) => id !== cur);
+      if (nxt === undefined || chain.has(nxt)) break;
+      chain.add(nxt);
+      cur = nxt;
+      ein = eout;
+    }
+  };
+  go(f0, via); // out through the opposite edge
+  const across = E[via].faces.find((id) => id !== f0);
+  if (across !== undefined && !chain.has(across)) {
+    chain.add(across);
+    go(across, via);
+  }
+  return [...chain];
+}
+
+// ---------------------------------------------------------------- delete and inset
+export function deleteFaces(g, idSet) {
+  const P = g.attributes.position.array;
+  const F = g.attributes.face.array;
+  const keep = [];
+  for (let t = 0; t < P.length / 9; t++) if (!idSet.has(F[t * 3])) keep.push(t);
+  if (!keep.length) return null;
+  const position = new Float32Array(keep.length * 9);
+  const face = new Float32Array(keep.length * 3);
+  keep.forEach((t, i) => {
+    position.set(P.subarray(t * 9, t * 9 + 9), i * 9);
+    face.set(F.subarray(t * 3, t * 3 + 3), i * 3);
+  });
+  return { position, face };
+}
+
+// Shrink each picked face toward its middle and fill the gap with a ring of faces.
+export function insetFaces(g, idSet, amount) {
+  const P = g.attributes.position.array;
+  const F = g.attributes.face.array;
+  let next = maxId(F) + 1;
+  const extraPos = [];
+  const extraFace = [];
+  const moves = []; // [triangle, vertex, newX, newY, newZ]
+  for (const id of idSet) {
+    const tris = [];
+    for (let t = 0; t < P.length / 9; t++) if (F[t * 3] === id) tris.push(t);
+    if (!tris.length) continue;
+    const seen = new Map();
+    for (const t of tris) for (let v = 0; v < 3; v++) seen.set(K(P, t * 9 + v * 3), P.subarray(t * 9 + v * 3, t * 9 + v * 3 + 3));
+    const c = new THREE.Vector3();
+    for (const q of seen.values()) c.add(new THREE.Vector3(q[0], q[1], q[2]));
+    c.divideScalar(seen.size);
+    const inner = (a) => [a[0] + (c.x - a[0]) * amount, a[1] + (c.y - a[1]) * amount, a[2] + (c.z - a[2]) * amount];
+    const rim = new Map();
+    for (const t of tris)
+      for (let k = 0; k < 3; k++) {
+        const i = t * 9 + k * 3;
+        const j = t * 9 + ((k + 1) % 3) * 3;
+        const ka = K(P, i);
+        const kb = K(P, j);
+        if (ka === kb) continue;
+        const ek = edgeKey(ka, kb);
+        const e = rim.get(ek);
+        if (e) e.n++;
+        else rim.set(ek, { n: 1, a: Array.from(P.subarray(i, i + 3)), b: Array.from(P.subarray(j, j + 3)) });
+      }
+    for (const w of rim.values()) {
+      if (w.n !== 1) continue;
+      const a2 = inner(w.a);
+      const b2 = inner(w.b);
+      extraPos.push(...w.a, ...w.b, ...a2, ...w.b, ...b2, ...a2);
+      extraFace.push(next, next, next, next, next, next);
+      next++;
+    }
+    for (const t of tris) for (let v = 0; v < 3; v++) moves.push([t, v, inner(Array.from(P.subarray(t * 9 + v * 3, t * 9 + v * 3 + 3)))]);
+  }
+  if (!moves.length) return null;
+  const out = pack(P, F, new Float32Array(extraPos), new Float32Array(extraFace));
+  for (const [t, v, q] of moves) out.position.set(q, t * 9 + v * 3);
   return out;
 }
