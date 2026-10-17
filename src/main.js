@@ -40,6 +40,7 @@ import {
   isInside,
 } from './nodes.js';
 import { STARTERS, posesFor } from './rigs.js';
+import { createPlay, cloneClean } from './play.js';
 import {
   buildTopology,
   extrudeFaces,
@@ -102,7 +103,10 @@ function resize() {
   renderer.setSize(r.width, r.height, false);
   camera.aspect = r.width / Math.max(r.height, 1);
   camera.updateProjectionMatrix();
+  if (play) play.resize();
 }
+// Play mode (the physics sandbox) is created the first time you press 🎮 Play
+let play = null;
 new ResizeObserver(resize).observe($('#stage'));
 
 // ---------------------------------------------------------------- state
@@ -665,6 +669,7 @@ canvas.addEventListener(
       down = null;
       return e.button === 2 ? endModal(false) : e.button === 0 ? endModal(true) : undefined;
     }
+    if (state.mode === 'play') return;
     if (!e.shiftKey || e.button !== 0 || state.tool !== 'points' || state.mode !== 'build' || !pts || transform.axis) return;
     e.stopImmediatePropagation();
     down = null;
@@ -708,6 +713,7 @@ canvas.addEventListener('pointerdown', (e) => {
   down = { x: e.clientX, y: e.clientY, onGizmo: !!transform.axis, button: e.button };
 });
 canvas.addEventListener('pointerup', (e) => {
+  if (state.mode === 'play') return;
   if (!down || down.onGizmo || down.button !== 0 || transform.dragging) return;
   if (Math.hypot(e.clientX - down.x, e.clientY - down.y) > 5) return;
   pick(e);
@@ -1231,7 +1237,68 @@ function swapShapeTo(type) {
 }
 
 // ---------------------------------------------------------------- pose mode
+function enterPlay() {
+  if (!partCount() && !confirm('You have not built anything yet, so you will play as a ready-made person. Go play?')) return;
+  if (state.mode === 'pose') restoreRest();
+  if (modal) endModal(false);
+  model.traverse((o) => isPart(o) && ensureFaceColors(o));
+  if (!play) {
+    play = createPlay({
+      renderer,
+      canvas,
+      toast,
+      hud: $('#play'),
+      cloneModel: () => cloneClean(model),
+    });
+    window.__bb && (window.__bb.play = play);
+  }
+  state.mode = 'play';
+  state.sticking = null;
+  select(null);
+  transform.detach();
+  orbit.enabled = false;
+  document.body.classList.add('playing');
+  applyBoneVisibility();
+  renderPlayHud();
+  resize();
+  play.start({ character: 'mine' });
+  refresh();
+}
+function exitPlay() {
+  if (play) play.stop();
+  document.body.classList.remove('playing');
+  state.mode = 'build';
+  orbit.enabled = true;
+  applyBoneVisibility();
+  resize();
+  refresh();
+}
+function renderPlayHud() {
+  const el = $('#play');
+  if (el.dataset.built) return;
+  el.dataset.built = '1';
+  const who = [['mine', '🧱', 'My model'], ...['person', 'dog', 'cat', 'horse', 'bird'].map((id) => [id, STARTERS[id].icon, STARTERS[id].label])];
+  el.innerHTML = `
+    <div id="playTop">
+      <button data-act="mode:build" class="soft">◀ Back to building</button>
+      <span class="who">Play as: ${who.map(([id, ic, l]) => `<button class="mini" data-act="playas:${id}" title="${l}">${ic} ${l}</button>`).join('')}</span>
+      <span id="playState"></span>
+    </div>
+    <div id="playHelp">
+      <b>🎮 Controls</b>
+      <span><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> move · <kbd>Shift</kbd> run · <kbd>Space</kbd> jump (twice for a double jump!)</span>
+      <span><kbd>C</kbd> crouch · <kbd>X</kbd> crawl · <kbd>E</kbd> pick up / drop · click or <kbd>F</kbd> throw (hold to throw harder)</span>
+      <span>🧗 Walk into the <b>brown wall</b> to climb · 🏃 Run and jump next to a wall to <b>wall run</b> · 🤸 Pink pad = bounce</span>
+      <span><kbd>1</kbd> box · <kbd>2</kbd> ball · <kbd>3</kbd> <b>your model</b> as a toy · <kbd>R</kbd> new playground · <kbd>T</kbd> go back to start</span>
+      <span>Click the picture to look around with the mouse (<kbd>Esc</kbd> lets go). Arrow keys also turn the camera. Scroll to zoom. <kbd>H</kbd> hides this box.</span>
+    </div>`;
+}
 function setMode(m) {
+  if (m === 'play') return state.mode === 'play' ? undefined : enterPlay();
+  if (state.mode === 'play') {
+    exitPlay();
+    if (m === 'build') return;
+  }
   if (m === state.mode) return;
   if (m === 'pose') {
     if (!jointsList().length) {
@@ -1410,6 +1477,7 @@ const shapeBtns = (act) =>
 function renderTop() {
   $('#tab-build').classList.toggle('on', state.mode === 'build');
   $('#tab-pose').classList.toggle('on', state.mode === 'pose');
+  $('#tab-play').classList.toggle('on', state.mode === 'play');
   $('#undoBtn').disabled = hi <= 0;
   $('#redoBtn').disabled = hi >= hist.length - 1;
   $('#advBtn').classList.toggle('on', state.advanced);
@@ -1650,6 +1718,8 @@ document.addEventListener('click', (e) => {
       state.tool = arg;
       return refresh();
     case 'mode': return setMode(arg);
+    case 'playas':
+      return play && play.setCharacter(arg);
     case 'shape': return swapShapeTo(arg);
     case 'stick': return stickOn(arg);
     case 'stickto': return startStick();
@@ -1770,6 +1840,7 @@ document.addEventListener('change', (e) => {
 const NUMPAD_VIEWS = { Numpad1: 'front', Numpad3: 'side', Numpad7: 'top' };
 window.addEventListener('keydown', (e) => {
   if (/input|textarea/i.test(document.activeElement.tagName) && document.activeElement.type !== 'checkbox') return;
+  if (state.mode === 'play') return;
   if (modal) return modalKey(e);
   const mod = e.metaKey || e.ctrlKey;
   const c = e.code;
@@ -1823,6 +1894,11 @@ window.addEventListener('keydown', (e) => {
 
 // ---------------------------------------------------------------- loop
 function frame() {
+  if (state.mode === 'play' && play && play.running) {
+    play.frame();
+    requestAnimationFrame(frame);
+    return;
+  }
   orbit.update();
   model.traverse((o) => isPart(o) && ensureFaceColors(o));
   if (flags.bones) for (const j of jointsList()) updateBoneLine(j);

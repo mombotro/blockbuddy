@@ -19,6 +19,25 @@ Simple 3D block modeler for kids. Builds models for three.js games.
 - **Pose tab:** presets, plus drag rings on any bone. Orange dots are the bones.
 - **Undo/redo**, autosave (browser storage), Save/Open `.blockbuddy.json`.
 
+## 🎮 Play mode (physics sandbox)
+Press **🎮 Play** at the top to drop your model into a playground. Pick **My model**, Person, Dog, Cat, Horse or Bird.
+
+| | |
+|---|---|
+| `W A S D` + `Shift` | walk / run |
+| `Space` | jump, press again in the air to double jump (birds flap to fly) |
+| `C` / `X` | crouch (hold) / crawl (toggle). Low tunnels and beams make you duck by yourself |
+| walk into the brown wall | climb (`W` `S` `A` `D`, `Space` to leap off), you pull yourself over the top |
+| run + jump beside a wall | wall run, `Space` wall-jumps off |
+| `E` / click | pick up / drop the crate or ball in front of you |
+| click or `F` while holding | throw, hold longer to throw harder |
+| `1` `2` `3` | spawn a box, a ball, or **your model as a throwable toy** |
+| `R` / `T` | new playground / back to start |
+
+Legs are procedural IK, so feet land on stairs and ramps and every limb steps for itself. Hands reach for what you carry. The world scales to your model (a cat gets a small playground).
+For **your own animals**, name the limb bones like the premade ones: `LeftHip` -> `LeftKnee` -> `LeftAnkle` (or `FrontLeftShoulder` -> `FrontLeftKnee`, also `Left/RightShoulder` -> `Elbow` -> `Wrist` for arms). Bones named `Hips`, `Spine`, `Neck`, `Head`, `Tail…` and `LeftWing`/`RightWing` get extra motion. A model with no limb bones slides around.
+Physics is [cannon-es](https://github.com/pmndrs/cannon-es), bundled in.
+
 ## Export for three.js
 "Export for game" writes a `.glb`. The rig is a node hierarchy: bones are plain nodes
 (`Hips`, `Spine`, `LeftShoulder`, `RightKnee`, ...) with the shapes parented under them.
@@ -37,6 +56,8 @@ Animate by rotating bones by name, or build an AnimationClip with tracks like `L
 - `src/textures.js` pattern canvases and materials
 - `src/nodes.js` joints and parts, twins/mirroring, save/load
 - `src/rigs.js` buddy and starter builders, pose presets
+- `src/editmesh.js` faces, edges, extrude, inset, bevel, merge, fill, loops
+- `src/play.js` Play mode: world, character controller, IK walker
 - `src/main.js` scene, gizmos, picking, UI, export
 
 ## Not built yet (ideas)

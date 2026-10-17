@@ -8,6 +8,7 @@
     "dev": "esbuild src/main.js --bundle --format=iife --outfile=blockbuddy.js --watch"
   },
   "dependencies": {
+    "cannon-es": "^0.20.0",
     "esbuild": "^0.28.2",
     "three": "^0.186.1"
   }
