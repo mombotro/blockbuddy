@@ -1787,6 +1787,15 @@ export function createPlay(ctx) {
     R.visual.position.copy(C.saddleLocal).add(V(0, (-hipsY + 0.03) * sc, 0));
     R.visual.quaternion.identity();
     seatedPose(R);
+    if (!R.biped) {
+      // animals sit by their bounding box: belly on the saddle, centered on it (hips alone put them too far forward and into the mount)
+      C.visual.updateMatrixWorld(true);
+      const box = new THREE.Box3().setFromObject(R.visual);
+      const ctr = box.getCenter(V());
+      const sad = C.spine.localToWorld(C.saddleLocal.clone());
+      const d = V(sad.x - ctr.x, sad.y - box.min.y + 0.01, sad.z - ctr.z);
+      R.visual.position.add(C.spine.worldToLocal(C.spine.localToWorld(V()).add(d)));
+    }
     R.visual.traverse((o) => o.isMesh && (o.castShadow = true));
     P.rider = { char: R, prevId: riderId, scale: sc };
     toast('You are riding! The animal does everything it can: run, jump, climb. Use “Get off” to hop down. 🐴');
