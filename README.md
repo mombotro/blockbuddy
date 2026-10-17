@@ -20,7 +20,7 @@ Simple 3D block modeler for kids. Builds models for three.js games.
 - **Undo/redo**, autosave (browser storage), Save/Open `.blockbuddy.json`.
 
 ## 🎮 Play mode (physics sandbox)
-Press **🎮 Play** at the top to drop your model into a playground. Pick **My model**, Person, Dog, Cat, Horse or Bird.
+Press **🎮 Play** at the top to drop your model into a playground. Everything lives under the **☰ Menu** button (`M`): Play as, Ride, Gear, Go to, Cars, Ride an animal, My models. **❓ Controls** (or `H`) shows and hides the controls box.
 
 | | |
 |---|---|
@@ -50,11 +50,11 @@ Press **🎮 Play** at the top to drop your model into a playground. Pick **My m
 Tricks stack into a combo. Land clean to bank it (points × number of tricks); land crooked, mid-trick or sideways and you bail and lose the combo. The skate park has a halfpipe, rails, a kicker, a fun box and a ledge.
 
 ### ⚔️ Foam swords and dart guns, 🏙️ the city, 🚗 cars, 🐴 riding animals
-- **Gear:** `Q` cycles foam sword, giant foam sword, dart pistol, foam blaster and mega shooter (or click the gear bar). Click / `F` swings or shoots, `Z` reloads. Swing at crates, balloons and foam dummies, shoot balloons and bullseyes at the target range. Guns aim where the camera points (crosshair).
+- **Gear:** `Q` cycles foam sword, giant foam sword, dart pistol, foam blaster and mega shooter (or the Gear section). Click / `F` swings or shoots, `Z` reloads. Swing at crates, balloons and foam dummies, shoot balloons and bullseyes at the target range. Guns aim where the camera points (crosshair).
 - **City:** a block city of climbable buildings (walk into any wall to climb, mantle onto the roof), alleys for wall running, sky bridges, launch pads, a plaza with stairs / rail / ledge / quarter pipe, and sedans on the streets.
-- **Zones:** the Go to bar (or `Y`) jumps to the start, skate park, city or target range. `T` goes home.
-- **Driving:** walk up to a car, kart, truck or hovercraft and press `E`. `W`/`S` gas and reverse, `A`/`D` steer, `Space` brake (hop for the hovercraft), `Shift` boost, `U` flip upright, `E` get out. The **Cars** bar spawns more.
-- **Riding animals:** the **Ride a** bar (Horse, Dog, Cat, My animal). You become the animal (it runs, jumps and climbs as it always does) with your old character sitting on its back. **Get off** hops down.
+- **Zones:** the Go to menu section (or `Y`) jumps to the start, skate park, city or target range. `T` goes home.
+- **Driving:** walk up to a car, kart, truck or hovercraft and press `E`. `W`/`S` gas and reverse, `A`/`D` steer, `Space` brake (hop for the hovercraft), `Shift` boost, `U` flip upright, `E` get out. The **Cars** section spawns more.
+- **Riding animals:** the **Ride an animal** section (Horse, Dog, Cat, My animal). You become the animal (it runs, jumps and climbs as it always does) with your old character sitting on its back. **Get off** hops down.
 - **Add your own files:** **📂 Add my saved model…** (or drag a `.json` onto the picture) drops a saved BlockBuddy model into the playground. Small models are toys, huge ones are solid and climbable, and models marked below do their job.
 
 ### ⚙️ "What can it do?" (in the editor, left panel)

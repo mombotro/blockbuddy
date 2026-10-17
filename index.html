@@ -99,15 +99,16 @@
   #playTop { position: absolute; top: 10px; left: 10px; right: 10px; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
   #playTop .who { display: flex; gap: 4px; flex-wrap: wrap; align-items: center; background: var(--panel); border: 2px solid var(--line); border-radius: 16px; padding: 4px 8px; font-size: 13px; }
   #playTop .mini { font-size: 13px; padding: 3px 8px; }
-  #gearBar { position: absolute; right: 10px; bottom: 10px; display: flex; gap: 4px; flex-wrap: wrap; justify-content: flex-end; align-items: center; max-width: 52%; background: var(--panel); border: 2px solid var(--line); border-radius: 16px; padding: 6px 8px; pointer-events: auto; }
-  #gearBar .mini { font-size: 13px; padding: 3px 8px; }
+  #playMenu { position: absolute; top: 56px; left: 10px; width: 300px; max-height: calc(100% - 76px); overflow: auto; background: var(--panel); border: 2px solid var(--line); border-radius: 16px; padding: 6px 8px; pointer-events: auto; font-size: 13px; }
+  #playMenu[hidden], #playHelp[hidden] { display: none; }
+  #playMenu .msec { border-bottom: 1px solid var(--line); padding: 4px 0; }
+  #playMenu .msec:last-child { border-bottom: 0; }
+  #playMenu summary { cursor: pointer; font-weight: 700; padding: 3px 2px; }
+  #playMenu summary small { font-weight: 400; color: var(--soft); }
+  #playMenu .mrow, #gearBar { display: flex; flex-wrap: wrap; gap: 4px; padding: 4px 0 2px; }
+  #playMenu .mini { font-size: 13px; padding: 3px 8px; }
+  #playHelp b { display: flex; justify-content: space-between; align-items: center; }
   #gearAmmo { font-size: 13px; color: var(--soft); min-width: 90px; text-align: right; }
-  #zoneBar { position: absolute; left: 10px; top: 96px; display: flex; gap: 4px; align-items: center; flex-wrap: wrap; background: var(--panel); border: 2px solid var(--line); border-radius: 16px; padding: 4px 8px; font-size: 13px; pointer-events: auto; }
-  #zoneBar .mini { font-size: 13px; padding: 3px 8px; }
-  #mountBar { position: absolute; left: 10px; top: 172px; display: flex; gap: 4px; align-items: center; flex-wrap: wrap; background: var(--panel); border: 2px solid var(--line); border-radius: 16px; padding: 4px 8px; font-size: 13px; pointer-events: auto; }
-  #mountBar .mini { font-size: 13px; padding: 3px 8px; }
-  #vehBar { position: absolute; left: 10px; top: 134px; display: flex; gap: 4px; align-items: center; flex-wrap: wrap; background: var(--panel); border: 2px solid var(--line); border-radius: 16px; padding: 4px 8px; font-size: 13px; pointer-events: auto; }
-  #vehBar .mini { font-size: 13px; padding: 3px 8px; }
   #cross { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); font-size: 34px; font-weight: 300; color: #fff; text-shadow: 0 0 4px #000, 0 0 2px #000; pointer-events: none; }
   #cross[hidden] { display: none; }
   #rideCombo { position: absolute; top: 64px; left: 0; right: 0; text-align: center; font-size: 26px; font-weight: 800; color: #fff; text-shadow: 0 2px 6px rgba(40,20,100,.7); pointer-events: none; }

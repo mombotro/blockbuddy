@@ -1307,32 +1307,31 @@ function renderPlayHud() {
   if (el.dataset.built) return;
   el.dataset.built = '1';
   const who = [['mine', '🧱', 'My model'], ...['person', 'dog', 'cat', 'horse', 'bird'].map((id) => [id, STARTERS[id].icon, STARTERS[id].label])];
+  const btns = (act, rows) => rows.map(([id, l]) => `<button class="mini" data-act="${act}:${id}">${l}</button>`).join('');
+  const sec = (title, body, open) => `<details class="msec"${open ? ' open' : ''}><summary>${title}</summary><div class="mrow">${body}</div></details>`;
   el.innerHTML = `
     <div id="playTop">
-      <button data-act="mode:build" class="soft">◀ Back to building</button>
-      <span class="who">Play as: ${who.map(([id, ic, l]) => `<button class="mini" data-act="playas:${id}" title="${l}">${ic} ${l}</button>`).join('')}</span>
+      <button data-act="mode:build" class="soft">◀ Back</button>
+      <button id="burger" data-act="menu" class="soft" title="Open the menu" aria-expanded="false">☰ Menu</button>
+      <button id="helpBtn" data-act="help" class="soft" title="Show or hide the controls (H)">❓ Controls</button>
       <span id="playState"></span>
-      <span class="who">Ride: ${[['walk', '🚶', 'Walk'], ['skate', '🛹', 'Skateboard'], ['scooter', '🛴', 'Scooter'], ['blades', '🛼', 'Roller skates']]
-        .map(([id, ic, l]) => `<button class="mini ${id === 'walk' ? 'on' : ''}" data-act="ride:${id}" title="${l}">${ic} ${l}</button>`)
-        .join('')}</span>
+      <span id="gearAmmo"></span>
     </div>
-    <div id="gearBar">${[['none', '✋', 'Hands'], ...['sword', 'bigsword', 'pistol', 'blaster', 'mega'].map((id) => [id, { sword: '🗡️', bigsword: '⚔️', pistol: '🔫', blaster: '💥', mega: '🎯' }[id], { sword: 'Foam sword', bigsword: 'Giant sword', pistol: 'Dart pistol', blaster: 'Blaster', mega: 'Mega shooter' }[id]])]
-      .map(([id, ic, l]) => `<button class="mini ${id === 'none' ? 'on' : ''}" data-act="gear:${id}" title="${l}">${ic} ${l}</button>`)
-      .join('')}<span id="gearAmmo"></span></div>
-    <div id="zoneBar"><span>Go to:</span>${[['start', '🏠 Start'], ['skate', '🛹 Skate park'], ['city', '🏙️ City'], ['range', '🎯 Target range']]
-      .map(([id, l]) => `<button class="mini" data-act="zone:${id}">${l}</button>`)
-      .join('')}<button class="mini" data-act="playload" title="Add a saved BlockBuddy model (.json) as a toy">📂 Add my saved model…</button></div>
-    <div id="vehBar"><span>Cars:</span>${[['kart', '🏎️ Go-kart'], ['truck', '🛻 Truck'], ['hover', '🛸 Hovercraft'], ['mine', '🚗 My vehicle']]
-      .map(([id, l]) => `<button class="mini" data-act="spawnveh:${id}">${l}</button>`)
-      .join('')}<span class="tip small">press E next to one to drive</span></div>
-    <div id="mountBar"><span>Ride a:</span>${[['horse', '🐴 Horse'], ['dog', '🐶 Dog'], ['cat', '🐱 Cat'], ['mine', '🦄 My animal']]
-      .map(([id, l]) => `<button class="mini" data-act="mount:${id}">${l}</button>`)
-      .join('')}<button class="mini" data-act="dismount">⬇️ Get off</button></div>
+    <div id="playMenu" hidden>
+      ${sec('🙂 Play as', who.map(([id, ic, l]) => `<button class="mini" data-act="playas:${id}" title="${l}">${ic} ${l}</button>`).join(''), true)}
+      ${sec('🛹 Ride (V)', [['walk', '🚶', 'Walk'], ['skate', '🛹', 'Skateboard'], ['scooter', '🛴', 'Scooter'], ['blades', '🛼', 'Roller skates']]
+        .map(([id, ic, l]) => `<button class="mini ${id === 'walk' ? 'on' : ''}" data-act="ride:${id}" title="${l}">${ic} ${l}</button>`).join(''))}
+      ${sec('🗡️ Gear (Q)', '<div id="gearBar"></div>')}
+      ${sec('🗺️ Go to (Y)', btns('zone', [['start', '🏠 Start'], ['skate', '🛹 Skate park'], ['city', '🏙️ City'], ['range', '🎯 Target range']]))}
+      ${sec('🚗 Cars <small>press E next to one to drive</small>', btns('spawnveh', [['kart', '🏎️ Go-kart'], ['truck', '🛻 Truck'], ['hover', '🛸 Hovercraft'], ['mine', '🚗 My vehicle']]))}
+      ${sec('🐴 Ride an animal', btns('mount', [['horse', '🐴 Horse'], ['dog', '🐶 Dog'], ['cat', '🐱 Cat'], ['mine', '🦄 My animal']]) + '<button class="mini" data-act="dismount">⬇️ Get off</button>')}
+      ${sec('📂 My models', '<button class="mini" data-act="playload" title="Add a saved BlockBuddy model (.json) as a toy">📂 Add my saved model…</button>')}
+    </div>
     <div id="cross" hidden>+</div>
     <div id="rideCombo" hidden></div>
     <div id="rideScore" hidden></div>
     <div id="playHelp">
-      <b>🎮 Controls</b>
+      <b>🎮 Controls <button class="mini" data-act="help">✕ hide</button></b>
       <span><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> move · <kbd>Shift</kbd> run · <kbd>Space</kbd> jump (twice for a double jump!)</span>
       <span><kbd>C</kbd> crouch · <kbd>X</kbd> crawl · <kbd>E</kbd> pick up / drop · click or <kbd>F</kbd> throw (hold to throw harder)</span>
       <span>🧗 Walk into the <b>brown wall</b> to climb · 🏃 Run and jump next to a wall to <b>wall run</b> · 🤸 Pink pad = bounce</span>
@@ -1340,7 +1339,7 @@ function renderPlayHud() {
       <span>🗡️ <kbd>Q</kbd> swap gear (foam swords, dart pistol, blaster, mega shooter) · click or <kbd>F</kbd> swing / shoot · <kbd>Z</kbd> reload · <kbd>Y</kbd> next zone. Pop balloons, hit the bullseyes, knock over dummies!</span>
       <span>🚗 <kbd>E</kbd> next to a car to drive: <kbd>W</kbd><kbd>S</kbd> gas / reverse · <kbd>A</kbd><kbd>D</kbd> steer · <kbd>Space</kbd> brake · <kbd>Shift</kbd> boost · <kbd>U</kbd> flip upright · <kbd>E</kbd> get out</span>
       <span><kbd>1</kbd> box · <kbd>2</kbd> ball · <kbd>3</kbd> <b>your model</b> as a toy · <kbd>R</kbd> new playground · <kbd>T</kbd> go back to start</span>
-      <span>Click the picture to look around with the mouse (<kbd>Esc</kbd> lets go). Arrow keys also turn the camera. Scroll to zoom. <kbd>H</kbd> hides this box.</span>
+      <span>Click the picture to look around with the mouse (<kbd>Esc</kbd> lets go). Arrow keys also turn the camera. Scroll to zoom. <kbd>H</kbd> hides this box, <kbd>M</kbd> opens the menu.</span>
     </div>`;
 }
 function setMode(m) {
@@ -1804,6 +1803,17 @@ document.addEventListener('click', (e) => {
       state.tool = arg;
       return refresh();
     case 'mode': return setMode(arg);
+    case 'menu': {
+      const m = $('#playMenu');
+      m.hidden = !m.hidden;
+      $('#burger').setAttribute('aria-expanded', String(!m.hidden));
+      break;
+    }
+    case 'help': {
+      const h = $('#playHelp');
+      h.hidden = !h.hidden;
+      break;
+    }
     case 'playas':
       return play && play.setCharacter(arg);
     case 'ride':

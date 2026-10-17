@@ -2281,7 +2281,7 @@ export function createPlay(ctx) {
     const bar = hud && hud.querySelector('#gearBar');
     if (!bar) return;
     const items = [['none', '✋', 'Hands'], ...GEAR_ORDER.slice(1).map((id) => [id, GEAR[id].icon, GEAR[id].label]), ...customGear.map((c) => [c.id, '🌟', c.G.label])];
-    bar.innerHTML = items.map(([id, ic, l]) => `<button class="mini" data-act="gear:${id}" title="${l}">${ic} ${l}</button>`).join('') + '<span id="gearAmmo"></span>';
+    bar.innerHTML = items.map(([id, ic, l]) => `<button class="mini" data-act="gear:${id}" title="${l}">${ic} ${l}</button>`).join('');
     updateGearHud();
   }
   function registerMyUse() {
@@ -2812,6 +2812,10 @@ export function createPlay(ctx) {
     if (once('KeyH') && hud) {
       const h = hud.querySelector('#playHelp');
       if (h) h.hidden = !h.hidden;
+    }
+    if (once('KeyM') && hud) {
+      const b = hud.querySelector('#burger');
+      if (b) b.click();
     }
     if (once('KeyX')) P.crawlToggle = !P.crawlToggle;
     if (once('Digit1')) spawnBox();
