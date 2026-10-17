@@ -1559,15 +1559,23 @@ export function createPlay(ctx) {
         R.speed = -R.speed;
       }
       const Fh = fwdOf(R.heading);
-      const d = Fh.clone().addScaledVector(n, -Fh.dot(n));
-      if (d.lengthSq() < 1e-4) d.copy(Fh);
+      // carry your heading onto the slope without squashing it: straight at a ramp always climbs it, even a vertical one
+      const d = Fh.clone();
+      const hn = V(n.x, 0, n.z);
+      const sinT = hn.length();
+      if (sinT > 1e-3) {
+        hn.divideScalar(sinT);
+        const a = -Fh.dot(hn);
+        const lat = Fh.clone().addScaledVector(hn, -Fh.dot(hn));
+        d.copy(lat).addScaledVector(hn, -n.y * a).addScaledVector(UP, sinT * a);
+      }
       d.normalize();
       const cap = cfg.maxPush * (running_ ? 1.25 : 1);
       R.pushing = fi > 0 && R.speed < cap;
       if (R.pushing) R.speed += cfg.pushAcc * dt * (R.speed < 1 ? 1.6 : 1);
       if (fi < 0) R.speed = Math.max(0, R.speed - cfg.brake * dt);
       R.speed -= Math.sign(R.speed) * cfg.fric * dt;
-      R.speed += -GRAVITY * d.y * dt * 0.95; // downhill speeds you up, uphill slows you
+      R.speed += -GRAVITY * d.y * dt * 0.45; // downhill speeds you up, uphill slows you (softer than real gravity so you can reach the lip)
       // pump the transitions: holding W while you ride a ramp builds speed, like in the games
       if (fi > 0 && Math.abs(d.y) > 0.25 && Math.abs(R.speed) > 2) R.speed += Math.sign(R.speed) * 14 * Math.abs(d.y) * dt;
       if (R.speed > cap && Math.abs(d.y) < 0.15) R.speed -= (R.speed - cap) * 0.5 * dt;
@@ -2905,8 +2913,16 @@ export function createPlay(ctx) {
     // ---- ground check
     const wasGround = P.grounded;
     const riding = P.ride !== 'walk';
-    const gHit = ray(V(b.position.x, b.position.y, b.position.z), V(b.position.x, b.position.y - P.r - (riding ? 0.34 : 0.16) * ws, b.position.z));
-    P.grounded = !!gHit && gHit.normal.y > (riding ? 0.2 : 0.55) && b.velocity.y < P.jumpV * (riding ? 0.6 : 0.55);
+    const c0 = V(b.position.x, b.position.y, b.position.z);
+    let gHit = null;
+    if (riding && wasGround && P.groundNormal.y < 0.9) {
+      // steep ramp: the surface is beside you, not below, so look along the last surface normal (works up to vertical)
+      gHit = ray(c0, c0.clone().addScaledVector(P.groundNormal, -(P.r + 0.34 * ws)));
+    }
+    if (!gHit) gHit = ray(c0, V(b.position.x, b.position.y - P.r - (riding ? 0.34 : 0.16) * ws, b.position.z));
+    // leaving the surface fast (an ollie, a launch) is not "grounded"; riding up a ramp is
+    const away = gHit && riding ? b.velocity.dot(gHit.normal) : b.velocity.y;
+    P.grounded = !!gHit && gHit.normal.y > (riding ? -0.1 : 0.55) && away < P.jumpV * (riding ? 0.6 : 0.55);
     if (gHit) P.groundNormal.copy(gHit.normal);
     P.groundBody = gHit ? gHit.body : null;
     if (P.grounded) {
