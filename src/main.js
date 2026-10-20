@@ -213,18 +213,29 @@ function redo() {
 
 // ---------------------------------------------------------------- selection / outline / handles
 const outlineMat = new THREE.LineBasicMaterial({ color: 0xfbbf24, depthTest: false, transparent: true });
+// thick glowing outlines: the main pick is yellow, the others you added are orange
+function outlineFor(part, color, width) {
+  const eg = new THREE.EdgesGeometry(part.geometry, 20);
+  const l = fatLines(color, width, { depthTest: false, offset: false });
+  setFat(l, Array.from(eg.attributes.position.array));
+  eg.dispose();
+  l.userData.helper = true;
+  l.renderOrder = 15;
+  part.add(l);
+  return l;
+}
+function dropOutline(l) {
+  l.parent && l.parent.remove(l);
+  l.geometry.dispose();
+  fatMats.delete(l.material);
+  l.material.dispose();
+}
 function setOutline(part) {
   if (outline) {
-    outline.parent && outline.parent.remove(outline);
-    outline.geometry.dispose();
+    dropOutline(outline);
     outline = null;
   }
-  if (part && isPart(part)) {
-    outline = new THREE.LineSegments(new THREE.EdgesGeometry(part.geometry, 20), outlineMat);
-    outline.userData.helper = true;
-    outline.renderOrder = 15;
-    part.add(outline);
-  }
+  if (part && isPart(part)) outline = outlineFor(part, 0xffd23f, state.tool === 'points' ? 1.5 : 3.5);
 }
 // ---------------------------------------------------------------- points mode: dots, edges, faces
 // All the dots / edge diamonds / face squares are children of the part (so they follow it).
@@ -323,6 +334,7 @@ function buildPoints(part) {
   pts.wireFront = fatLines(0x1d1b33, 1.8);
   pts.dotsBack = dotPoints(6, false, 0.35);
   pts.dotsFront = dotPoints(state.emode === 'face' ? 8 : 10, true, 1);
+  pts.dotsSel = dotPoints(state.emode === 'face' ? 14 : 16, false, 1);
   pts.selLines = fatLines(SEL_COLOR, 4.5, { depthTest: false, offset: false });
   pts.hoverLines = fatLines(HOVER_COLOR, 4, { depthTest: false, offset: false });
   pts.selLines.renderOrder = 40;
@@ -331,7 +343,8 @@ function buildPoints(part) {
   pts.wireFront.renderOrder = 21;
   pts.dotsBack.renderOrder = 42;
   pts.dotsFront.renderOrder = 43;
-  for (const o of [pts.wireBack, pts.wireFront, pts.selLines, pts.hoverLines, pts.dotsBack, pts.dotsFront]) root.add(o);
+  pts.dotsSel.renderOrder = 44;
+  for (const o of [pts.wireBack, pts.wireFront, pts.selLines, pts.hoverLines, pts.dotsBack, pts.dotsFront, pts.dotsSel]) root.add(o);
   updatePoints();
 }
 const faceTri = (g, tris) => {
@@ -370,6 +383,19 @@ function updatePoints() {
     d.geometry.setAttribute('color', new THREE.BufferAttribute(col, 3));
     d.geometry.computeBoundingSphere();
   }
+  // the picked ones get big orange dots you can't miss
+  const selPos = new Float32Array(psel.length * 3);
+  const selCol = new Float32Array(psel.length * 3);
+  const sc = new THREE.Color(SEL_COLOR);
+  psel.forEach((i, k) => {
+    if (pts.mode === 'edge') return;
+    selPos.set([pts.centers[i].x, pts.centers[i].y, pts.centers[i].z], k * 3);
+    selCol.set([sc.r, sc.g, sc.b], k * 3);
+  });
+  pts.dotsSel.visible = pts.mode !== 'edge' && psel.length > 0;
+  pts.dotsSel.geometry.setAttribute('position', new THREE.BufferAttribute(selPos, 3));
+  pts.dotsSel.geometry.setAttribute('color', new THREE.BufferAttribute(selCol, 3));
+  pts.dotsSel.geometry.computeBoundingSphere();
   // picked and hovered things
   const lineFor = (list) => {
     const arr = [];
@@ -520,19 +546,10 @@ const nearestJoint = (n) => {
 const groupParts = () => [state.selected, ...state.multi].filter((o) => o && isPart(o) && o.parent);
 let multiOutlines = [];
 function setMultiOutlines() {
-  for (const o of multiOutlines) {
-    o.parent && o.parent.remove(o);
-    o.geometry.dispose();
-  }
+  multiOutlines.forEach(dropOutline);
   multiOutlines = [];
   if (!state.multi.length || state.mode !== 'build') return;
-  for (const part of groupParts()) {
-    const l = new THREE.LineSegments(new THREE.EdgesGeometry(part.geometry, 20), outlineMat);
-    l.userData.helper = true;
-    l.renderOrder = 15;
-    part.add(l);
-    multiOutlines.push(l);
-  }
+  for (const part of state.multi) if (part && isPart(part) && part.parent) multiOutlines.push(outlineFor(part, 0xff7a1a, 3.5));
 }
 function toggleGroup(part) {
   const cur = state.selected;
@@ -1943,9 +1960,20 @@ function renderToolbar() {
   el.classList.toggle('hidden', false);
 }
 
+function groupBlock() {
+  if (!state.multi.length) return '';
+  const ps = groupParts();
+  return `<div class="sec"><b>☑️ ${ps.length} shapes picked</b>
+    <div class="chips">${ps.map((q, i) => `<button class="mini gchip ${i === 0 ? 'main' : ''}" data-act="ungrp:${q.userData.id}" title="${i === 0 ? 'The main one (yellow)' : 'Orange'}: click to take it out">${i === 0 ? '⭐ ' : ''}${esc(q.name)} ✕</button>`).join('')}</div>
+    <p class="tip small">Yellow outline = main one, orange = the others. Color, pattern, move, turn, size, copy and delete work on all of them.</p></div>`;
+}
 function renderRight() {
   const n = state.selected;
   const el = $('#right');
+  renderRight0(n, el);
+  if (n && state.multi.length) el.insertAdjacentHTML('afterbegin', groupBlock());
+}
+function renderRight0(n, el) {
   if (!n) {
     el.innerHTML = `<h3>Nothing picked</h3><p class="tip">Click any shape in the picture to change its color, pattern and shape.</p>
       <p class="tip">🖱️ Left-drag to spin around.<br>🖱️ Right-drag to slide.<br>🖱️ Scroll to zoom.</p>
@@ -2158,6 +2186,11 @@ document.addEventListener('click', (e) => {
     case 'delbone': return deleteBone(n);
     case 'resetpose': return resetPose();
     case 'delsel': return deleteSel();
+    case 'ungrp': {
+      const q = byId(arg);
+      if (q) toggleGroup(q);
+      return;
+    }
     case 'selallparts': return selectAllParts();
     case 'boxsel':
       state.boxSel = !state.boxSel;
