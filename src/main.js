@@ -158,6 +158,22 @@ function docJSON() {
     nodes: kids(model).map(serializeNode),
   });
 }
+// Pose mode keeps its own undo list, so undoing a pose never undoes your building (and the other way round)
+let poseHist = null; // { build: { hist, hi }, rest: Map(id -> { p, q }) }
+function enterPoseHistory() {
+  poseHist = {
+    build: { hist, hi },
+    rest: new Map(jointsList().map((j) => [j.userData.id, { p: j.userData.rest.p.clone(), q: j.userData.rest.q.clone() }])),
+  };
+  hist = [docJSON()];
+  hi = 0;
+}
+function leavePoseHistory() {
+  if (!poseHist) return;
+  hist = poseHist.build.hist;
+  hi = poseHist.build.hi;
+  poseHist = null;
+}
 function commit() {
   const snap = docJSON();
   if (hist[hi] === snap) return;
@@ -165,7 +181,7 @@ function commit() {
   hist.push(snap);
   if (hist.length > 80) hist.shift();
   hi = hist.length - 1;
-  try {
+  if (!poseHist) try {
     localStorage.setItem(AUTOSAVE, snap);
   } catch (e) {
     /* storage full or blocked: fine */
@@ -194,6 +210,11 @@ function loadDoc(doc, selId = null) {
   for (const n of doc.nodes) deserialize(n, model);
   state.selected = byId(selId);
   state.multi = [];
+  if (poseHist)
+    for (const j of jointsList()) {
+      const r = poseHist.rest.get(j.userData.id);
+      if (r) j.userData.rest = { p: r.p.clone(), q: r.q.clone() };
+    }
   applyBoneVisibility();
 }
 function undo() {
@@ -513,7 +534,7 @@ function selectEls(list, additive) {
 }
 const selGroups = () => [...new Set(psel.flatMap((i) => pts.els[i].gs))];
 function attachPivot() {
-  if (!pts || !psel.length) {
+  if (!pts || !psel.length || state.pgizmo === 'select') {
     transform.detach();
     return;
   }
@@ -610,7 +631,7 @@ function applyTool() {
     transform.setSpace('world');
     return;
   }
-  if (state.multi.length && state.mode === 'build' && state.tool !== 'points' && state.tool !== 'paint') {
+  if (state.multi.length && state.mode === 'build' && state.tool !== 'points' && state.tool !== 'paint' && state.tool !== 'select') {
     groupMode = true;
     return attachGroup();
   }
@@ -620,7 +641,7 @@ function applyTool() {
     attachPivot();
     return;
   }
-  if (state.tool === 'paint') {
+  if (state.tool === 'paint' || state.tool === 'select') {
     transform.detach();
     return;
   }
@@ -912,7 +933,7 @@ canvas.addEventListener(
       return e.button === 2 ? endModal(false) : e.button === 0 ? endModal(true) : undefined;
     }
     if (state.mode === 'play') return;
-    if (lcut || !(e.shiftKey || e.ctrlKey || e.metaKey || state.boxSel) || e.button !== 0 || state.tool !== 'points' || state.mode !== 'build' || !pts || transform.axis) return;
+    if (lcut || !(e.shiftKey || e.ctrlKey || e.metaKey || state.boxSel || state.pgizmo === 'select') || e.button !== 0 || state.tool !== 'points' || state.mode !== 'build' || !pts || transform.axis) return;
     e.stopImmediatePropagation();
     down = null;
     marquee = { x0: e.clientX, y0: e.clientY, x1: e.clientX, y1: e.clientY, add: e.shiftKey || e.ctrlKey || e.metaKey };
@@ -1362,6 +1383,7 @@ function setAdvanced(on) {
 function resetPose() {
   restoreRest();
   state.poseIdx = 0;
+  commit();
   renderLeft();
 }
 
@@ -1499,6 +1521,7 @@ canvas.addEventListener(
 
 function startWith(id) {
   if (partCount() > 0 && !confirm('Start something new? Your current model will be replaced. (You can undo.)')) return;
+  leavePoseHistory();
   clearModel();
   const st = STARTERS[id];
   st.build(model);
@@ -1515,6 +1538,7 @@ function startWith(id) {
 }
 function newBlank() {
   if (partCount() > 0 && !confirm('Start over with an empty scene? (You can undo.)')) return;
+  leavePoseHistory();
   clearModel();
   state.rig = null;
   state.use = null;
@@ -1577,7 +1601,10 @@ function swapShapeTo(type) {
 // ---------------------------------------------------------------- pose mode
 function enterPlay() {
   if (!partCount() && !confirm('You have not built anything yet, so you will play as a ready-made person. Go play?')) return;
-  if (state.mode === 'pose') restoreRest();
+  if (state.mode === 'pose') {
+    restoreRest();
+    leavePoseHistory();
+  }
   if (modal) endModal(false);
   model.traverse((o) => isPart(o) && ensureFaceColors(o));
   if (!play) {
@@ -1666,10 +1693,12 @@ function setMode(m) {
     }
     jointsList().forEach((j) => (j.userData.rest = { p: j.position.clone(), q: j.quaternion.clone() }));
     state.mode = 'pose';
+    enterPoseHistory();
     state.poseIdx = 0;
     state.selected = state.selected && isPart(state.selected) ? nearestJoint(state.selected) : state.selected;
   } else {
     restoreRest();
+    leavePoseHistory();
     state.mode = 'build';
   }
   applyBoneVisibility();
@@ -1683,7 +1712,7 @@ function restoreRest() {
     }
   });
 }
-function applyPose(i) {
+function applyPose(i, record = false) {
   const pose = posesFor(state.rig)[i];
   if (!pose) return;
   state.poseIdx = i;
@@ -1698,6 +1727,7 @@ function applyPose(i) {
   }
   const root = byName.get('Hips');
   if (root && pose.drop) root.position.y = root.userData.rest.p.y + pose.drop;
+  if (record) commit();
   renderLeft();
 }
 function applyBoneVisibility() {
@@ -1795,6 +1825,7 @@ function openProject(file) {
     try {
       const doc = JSON.parse(fr.result);
       if (doc.app !== 'blockbuddy') throw new Error('not a BlockBuddy file');
+      leavePoseHistory();
       state.mode = 'build';
       state.selected = null;
       loadDoc(doc);
@@ -1938,15 +1969,16 @@ function renderToolbar() {
       `<button class="tool" data-act="tool:move"><span>◀</span>Done</button><i class="sep"></i>` +
       em('dot', '⚪', 'Dots') + em('edge', '➖', 'Edges') + em('face', '▣', 'Faces') +
       `<i class="sep"></i>` +
-      gz('move', '↔️', 'Move') + gz('turn', '🔄', 'Turn') + gz('size', '⤡', 'Size') +
+      gz('select', '⬚', 'Select') + gz('move', '↔️', 'Move') + gz('turn', '🔄', 'Turn') + gz('size', '⤡', 'Size') +
       `<i class="sep"></i><button class="tool" data-act="extrude" ${can ? '' : 'disabled'}><span>⬆️</span>Extrude</button>` +
       `<i class="sep"></i><button class="tool ${state.boxSel ? 'on' : ''}" data-act="boxsel" title="Drag a box to pick many. Right-drag moves the picture, scroll zooms."><span>⬚</span>Box</button>` +
       `<button class="tool" data-act="selall" title="A"><span>☑️</span>All</button><button class="tool" data-act="selnone" title="Alt+A"><span>☐</span>None</button><button class="tool" data-act="selinv" title="Ctrl+I"><span>🔁</span>Flip</button>` +
-      `<span class="label full">${hint} · Shift+click = pick more · Shift+drag or Box = drag a box</span>`;
+      `<span class="label full">${hint} · Shift+click = pick more · Select tool or Box = drag a box (no gizmo)</span>`;
   } else {
     const t = (id, icon, label) =>
       `<button class="tool ${state.tool === id ? 'on' : ''}" data-act="tool:${id}"><span>${icon}</span>${label}</button>`;
     html =
+      t('select', '⬚', 'Select') +
       t('move', '↔️', 'Move') +
       t('turn', '🔄', 'Turn') +
       t('size', '⤡', 'Size') +
@@ -2215,7 +2247,7 @@ document.addEventListener('click', (e) => {
     case 'pic': return $('#picFile').click();
     case 'dup': return duplicate();
     case 'del': return del();
-    case 'pose': return applyPose(+arg);
+    case 'pose': return applyPose(+arg, true);
     case 'undo': return undo();
     case 'redo': return redo();
     case 'new': return newBlank();

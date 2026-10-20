@@ -9,7 +9,7 @@ Simple 3D block modeler for kids. Builds models for three.js games.
 
 ## What it does
 - **Shapes:** box, ball, can, cone, pyramid, ramp. Move / Turn / Size gizmos (snap to grid).
-- **Points:** pick **Dots**, **Edges** or **Faces** and drag them with Move / Turn / Size. Every edge of the shape is drawn as a clear dark line (like Blender or Maya), dots are round, the thing under your mouse lights up pale yellow, and what you picked is thick orange. You don't have to hit a tiny target: the nearest dot, edge or face to the mouse gets picked. **Pick many:** Shift/Ctrl/Cmd+click adds or removes one, Shift+drag (or the **Box** button, then plain drag) draws a box that picks everything inside even behind the shape, and **All / None / Flip** buttons are in the bar.
+- **Points:** pick **Dots**, **Edges** or **Faces** and drag them with Move / Turn / Size. Every edge of the shape is drawn as a clear dark line (like Blender or Maya), dots are round, the thing under your mouse lights up pale yellow, and what you picked is thick orange. You don't have to hit a tiny target: the nearest dot, edge or face to the mouse gets picked. **Select tool:** the ⬚ Select button (next to Move / Turn / Size, and in the shape toolbar too) hides the gizmo so you can click and box-pick without grabbing arrows. **Pick many:** Shift/Ctrl/Cmd+click adds or removes one, Shift+drag (or the **Box** button, then plain drag) draws a box that picks everything inside even behind the shape, and **All / None / Flip** buttons are in the bar.
 - **Pick many shapes:** Shift/Ctrl/Cmd+click shapes to add them, or press **All shapes** (`A`). Move, turn, size, color, copy or delete them together. **Extrude** pushes picked faces out with side walls, or pulls a flap out of one edge. Keys: `1` `2` `3` modes, `M` `T` `S` gizmo, `E` extrude. Swap a part's shape type and keep its size.
 - **Blender-style editing:** `G` move, `R` rotate, `S` scale (works on parts and on picked dots/edges/faces), then `X`/`Y`/`Z` to lock an axis or type a number. `Tab` toggles edit points, `A` / `Alt+A` / `Ctrl+I` pick all / none / flip, `Alt+click` picks an edge loop or face loop, ring buttons pick everything on a level, `I` inset, `X` delete faces, `Shift+D` copy, numpad views. Press `?` in the app for the full list.
 - **🛠️ Advanced mode** (button at the top, remembered): Blender-style `G`/`R`/`S`, loop and ring select, inset, delete, **bevel**, **merge dots**, **extrude dots + fill** (build faces from loose dots), **face colors** (🖌️ Paint tool or pick faces then a swatch; saved in the game file as vertex colors), and **bone editing** (add, rename, re-parent, mirror, delete bones; build a skeleton on any model). Simple mode hides all of it.
@@ -19,7 +19,7 @@ Simple 3D block modeler for kids. Builds models for three.js games.
 - **Stick on:** add shapes as children of a part (hats, eyes, buttons). They follow the parent.
 - **Color + patterns:** 16 colors plus any color, 11 patterns that take the part color, pattern size slider, own picture.
 - **Buddies:** Person, Dog, Cat, Horse, Bird with bones and pose presets. Tree, House, Table starters.
-- **Pose tab:** presets, plus drag rings on any bone. Orange dots are the bones.
+- **Pose tab:** presets, plus drag rings on any bone. Orange dots are the bones. Pose has its own Undo list, so undoing a pose never undoes your building.
 - **Undo/redo**, autosave (browser storage), Save/Open `.blockbuddy.json`.
 
 ## 🎮 Play mode (physics sandbox)
