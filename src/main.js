@@ -1,6 +1,9 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { TransformControls } from 'three/examples/jsm/controls/TransformControls.js';
+import { LineSegments2 } from 'three/examples/jsm/lines/LineSegments2.js';
+import { LineSegmentsGeometry } from 'three/examples/jsm/lines/LineSegmentsGeometry.js';
+import { LineMaterial } from 'three/examples/jsm/lines/LineMaterial.js';
 import { GLTFExporter } from 'three/examples/jsm/exporters/GLTFExporter.js';
 import {
   SHAPES,
@@ -103,6 +106,7 @@ function resize() {
   renderer.setSize(r.width, r.height, false);
   camera.aspect = r.width / Math.max(r.height, 1);
   camera.updateProjectionMatrix();
+  fatMats.forEach(sizeFatMat);
   if (play) play.resize();
 }
 // Play mode (the physics sandbox) is created the first time you press 🎮 Play
@@ -126,6 +130,8 @@ const state = {
   poseIdx: 0,
   stickNew: false, // new shapes stick onto the picked part
   advanced: false, // the Blender-style extras
+  multi: [], // more shapes picked along with state.selected (Shift+click)
+  boxSel: false, // left-drag draws a pick box in Points mode
   bevelW: 0.06,
   boneCarry: false, // moving a bone drags its shapes along
   brushColor: '#ef4444', // face paint color
@@ -186,6 +192,7 @@ function loadDoc(doc, selId = null) {
   if (doc.name) state.name = doc.name;
   for (const n of doc.nodes) deserialize(n, model);
   state.selected = byId(selId);
+  state.multi = [];
   applyBoneVisibility();
 }
 function undo() {
@@ -221,23 +228,70 @@ function setOutline(part) {
 // ---------------------------------------------------------------- points mode: dots, edges, faces
 // All the dots / edge diamonds / face squares are children of the part (so they follow it).
 // Whatever is picked is moved by one gizmo (the "pivot") sitting at its middle.
-const HANDLE_COLOR = { dot: 0xffffff, edge: 0x7dd3fc, face: 0x86efac };
-const SEL_COLOR = 0xf97316;
-const handleGeos = {
-  dot: new THREE.SphereGeometry(0.024, 10, 8),
-  edge: new THREE.OctahedronGeometry(0.032),
-  face: new THREE.BoxGeometry(0.046, 0.046, 0.046),
-};
+const SEL_COLOR = 0xff8a1f; // picked: orange, like Blender
+const HOVER_COLOR = 0xfff3a3; // under the mouse
+const DOT_COLOR = 0x1d1b33;
 const pivot = new THREE.Object3D();
 scene.add(pivot);
-let pts = null; // { part, geo, mode, topo, els, root, handles, lines, sel }
+let pts = null; // { part, geo, mode, topo, els, root, centers, hover, wireFront, wireBack, dotsFront, dotsBack, selLines, hoverLines, sel, hoverFill }
 let psel = []; // picked elements (indexes into pts.els)
+
+// thick lines (plain GL lines are 1px and vanish). They need to know the screen size.
+const fatMats = new Set();
+function fatLines(color, width, { depthTest = true, opacity = 1, offset = true } = {}) {
+  const m = new LineMaterial({ color, linewidth: width, transparent: true, opacity, depthTest, depthWrite: false });
+  if (offset) {
+    m.polygonOffset = true;
+    m.polygonOffsetFactor = -2;
+    m.polygonOffsetUnits = -2;
+  }
+  m.userData = { width };
+  fatMats.add(m);
+  const l = new LineSegments2(new LineSegmentsGeometry(), m);
+  l.frustumCulled = false;
+  l.visible = false;
+  l.userData = { helper: true, ownGeo: true };
+  sizeFatMat(m);
+  return l;
+}
+function sizeFatMat(m) {
+  const v = renderer.getDrawingBufferSize(new THREE.Vector2());
+  m.resolution.copy(v);
+  m.linewidth = m.userData.width * renderer.getPixelRatio();
+}
+function setFat(l, arr) {
+  l.visible = arr.length >= 6;
+  if (l.visible) l.geometry.setPositions(arr);
+}
+const dotTex = (() => {
+  const c = document.createElement('canvas');
+  c.width = c.height = 64;
+  const g = c.getContext('2d');
+  g.fillStyle = '#fff';
+  g.beginPath();
+  g.arc(32, 32, 30, 0, Math.PI * 2);
+  g.fill();
+  const t = new THREE.CanvasTexture(c);
+  return t;
+})();
+function dotPoints(size, depthTest, opacity) {
+  const o = new THREE.Points(
+    new THREE.BufferGeometry(),
+    new THREE.PointsMaterial({ size, sizeAttenuation: false, map: dotTex, alphaTest: 0.3, vertexColors: true, transparent: true, opacity, depthTest, depthWrite: false }),
+  );
+  o.frustumCulled = false;
+  o.userData = { helper: true, ownGeo: true };
+  return o;
+}
 
 function clearPoints() {
   if (pts) {
     pts.root.parent && pts.root.parent.remove(pts.root);
     pts.root.traverse((o) => {
-      if (o.material) o.material.dispose();
+      if (o.material) {
+        fatMats.delete(o.material);
+        o.material.dispose();
+      }
       if (o.userData.ownGeo) o.geometry.dispose();
     });
   }
@@ -254,7 +308,6 @@ function elCenter(el) {
   el.gs.forEach((gi) => c.add(posOf(gi)));
   return c.divideScalar(el.gs.length);
 }
-const lineMat = (color) => new THREE.LineBasicMaterial({ color, depthTest: false, transparent: true });
 function buildPoints(part) {
   clearPoints();
   ensureFaces(part.geometry);
@@ -263,78 +316,160 @@ function buildPoints(part) {
   root.userData.helper = true;
   part.add(root);
   const els = topo[state.emode === 'dot' ? 'dots' : state.emode === 'edge' ? 'edges' : 'faces'];
-  pts = { part, geo: part.geometry, mode: state.emode, topo, els, root, handles: [], lines: null, sel: null };
-  if (state.emode === 'edge') {
-    const lg = new THREE.BufferGeometry();
-    lg.setAttribute('position', new THREE.BufferAttribute(new Float32Array(els.length * 6), 3));
-    pts.lines = new THREE.LineSegments(lg, lineMat(HANDLE_COLOR.edge));
-    pts.lines.userData = { helper: true, ownGeo: true };
-    pts.lines.renderOrder = 25;
-    pts.lines.frustumCulled = false;
-    root.add(pts.lines);
-  }
-  els.forEach((el, i) => {
-    const m = new THREE.Mesh(
-      handleGeos[state.emode],
-      new THREE.MeshBasicMaterial({ color: HANDLE_COLOR[state.emode], depthTest: false, transparent: true }),
-    );
-    m.renderOrder = 30;
-    m.userData = { helper: true, pel: i };
-    root.add(m);
-    pts.handles.push(m);
-  });
+  pts = { part, geo: part.geometry, mode: state.emode, topo, els, root, centers: [], hover: -1 };
+  // every edge of the shape, always drawn, so you can see where they go
+  pts.wireBack = fatLines(0x1d1b33, 1.2, { depthTest: false, opacity: 0.22, offset: false });
+  pts.wireFront = fatLines(0x1d1b33, 1.8);
+  pts.dotsBack = dotPoints(6, false, 0.35);
+  pts.dotsFront = dotPoints(state.emode === 'face' ? 8 : 10, true, 1);
+  pts.selLines = fatLines(SEL_COLOR, 4.5, { depthTest: false, offset: false });
+  pts.hoverLines = fatLines(HOVER_COLOR, 4, { depthTest: false, offset: false });
+  pts.selLines.renderOrder = 40;
+  pts.hoverLines.renderOrder = 41;
+  pts.wireBack.renderOrder = 20;
+  pts.wireFront.renderOrder = 21;
+  pts.dotsBack.renderOrder = 42;
+  pts.dotsFront.renderOrder = 43;
+  for (const o of [pts.wireBack, pts.wireFront, pts.selLines, pts.hoverLines, pts.dotsBack, pts.dotsFront]) root.add(o);
   updatePoints();
 }
-// reposition everything after the shape or the picks changed
+const faceTri = (g, tris) => {
+  const pos = [];
+  for (const t of tris) for (let k = 0; k < 3; k++) pos.push(g.getX(t * 3 + k), g.getY(t * 3 + k), g.getZ(t * 3 + k));
+  return pos;
+};
+// reposition everything after the shape, the picks or the mouse changed
 function updatePoints() {
   if (!pts) return;
-  const { els, handles, lines } = pts;
-  els.forEach((el, i) => {
-    handles[i].position.copy(elCenter(el));
-    handles[i].material.color.set(psel.includes(i) ? SEL_COLOR : HANDLE_COLOR[pts.mode]);
-    handles[i].scale.setScalar(psel.includes(i) ? 1.35 : 1);
+  const { els, topo } = pts;
+  const g = pts.part.geometry.attributes.position;
+  pts.centers = els.map(elCenter);
+  const gp = topo.groups.map((_, gi) => posOf(gi));
+  // wire: all the edges
+  const w = [];
+  for (const e of topo.edges) w.push(gp[e.gs[0]].x, gp[e.gs[0]].y, gp[e.gs[0]].z, gp[e.gs[1]].x, gp[e.gs[1]].y, gp[e.gs[1]].z);
+  setFat(pts.wireFront, w);
+  setFat(pts.wireBack, w);
+  // dots: the corners (dot mode) or the face middles (face mode). Edge mode has none.
+  const showDots = pts.mode !== 'edge';
+  const col = new Float32Array(els.length * 3);
+  const c = new THREE.Color();
+  const base = new THREE.Color(DOT_COLOR);
+  els.forEach((_, i) => {
+    c.copy(base);
+    if (psel.includes(i)) c.set(SEL_COLOR);
+    else if (i === pts.hover) c.set(HOVER_COLOR);
+    col.set([c.r, c.g, c.b], i * 3);
   });
-  if (lines) {
-    const a = lines.geometry.attributes.position;
-    els.forEach((el, i) => {
-      const p0 = posOf(el.gs[0]);
-      const p1 = posOf(el.gs[1]);
-      a.setXYZ(i * 2, p0.x, p0.y, p0.z);
-      a.setXYZ(i * 2 + 1, p1.x, p1.y, p1.z);
-    });
-    a.needsUpdate = true;
+  const posArr = new Float32Array(els.length * 3);
+  pts.centers.forEach((v, i) => posArr.set([v.x, v.y, v.z], i * 3));
+  for (const d of [pts.dotsFront, pts.dotsBack]) {
+    d.visible = showDots;
+    d.geometry.setAttribute('position', new THREE.BufferAttribute(posArr, 3));
+    d.geometry.setAttribute('color', new THREE.BufferAttribute(col, 3));
+    d.geometry.computeBoundingSphere();
   }
-  if (pts.sel) {
-    pts.root.remove(pts.sel);
-    pts.sel.geometry.dispose();
-    pts.sel.material.dispose();
-    pts.sel = null;
+  // picked and hovered things
+  const lineFor = (list) => {
+    const arr = [];
+    for (const i of list) {
+      if (i < 0) continue;
+      if (pts.mode === 'edge') arr.push(...gp[els[i].gs[0]].toArray(), ...gp[els[i].gs[1]].toArray());
+      else if (pts.mode === 'face') {
+        for (const e of topo.edges) if (e.faces.includes(els[i].id)) arr.push(...gp[e.gs[0]].toArray(), ...gp[e.gs[1]].toArray());
+      }
+    }
+    return arr;
+  };
+  setFat(pts.selLines, lineFor(psel));
+  setFat(pts.hoverLines, psel.includes(pts.hover) ? [] : lineFor([pts.hover]));
+  for (const k of ['sel', 'hoverFill']) {
+    if (pts[k]) {
+      pts.root.remove(pts[k]);
+      pts[k].geometry.dispose();
+      pts[k].material.dispose();
+      pts[k] = null;
+    }
   }
-  if (psel.length && pts.mode === 'face') {
-    const pos = [];
-    const g = pts.part.geometry.attributes.position;
-    for (const i of psel)
-      for (const t of els[i].tris) for (let k = 0; k < 3; k++) pos.push(g.getX(t * 3 + k), g.getY(t * 3 + k), g.getZ(t * 3 + k));
-    const sg = new THREE.BufferGeometry();
-    sg.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
-    pts.sel = new THREE.Mesh(
-      sg,
-      new THREE.MeshBasicMaterial({ color: SEL_COLOR, transparent: true, opacity: 0.45, depthTest: false, side: THREE.DoubleSide }),
-    );
-    pts.sel.renderOrder = 22;
-  } else if (psel.length && pts.mode === 'edge') {
-    const pos = [];
-    for (const i of psel) pos.push(...posOf(els[i].gs[0]).toArray(), ...posOf(els[i].gs[1]).toArray());
-    const sg = new THREE.BufferGeometry();
-    sg.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
-    pts.sel = new THREE.LineSegments(sg, lineMat(SEL_COLOR));
-    pts.sel.renderOrder = 26;
-    pts.sel.frustumCulled = false;
+  if (pts.mode === 'face') {
+    const fill = (list, color, opacity, order) => {
+      const pos = [];
+      for (const i of list) if (i >= 0) pos.push(...faceTri(g, els[i].tris));
+      if (!pos.length) return null;
+      const sg = new THREE.BufferGeometry();
+      sg.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+      const m = new THREE.Mesh(sg, new THREE.MeshBasicMaterial({ color, transparent: true, opacity, depthTest: false, side: THREE.DoubleSide, depthWrite: false }));
+      m.renderOrder = order;
+      m.userData = { helper: true, ownGeo: true };
+      pts.root.add(m);
+      return m;
+    };
+    pts.sel = fill(psel, SEL_COLOR, 0.4, 22);
+    pts.hoverFill = fill(psel.includes(pts.hover) ? [] : [pts.hover], HOVER_COLOR, 0.3, 23);
   }
-  if (pts.sel) {
-    pts.sel.userData = { helper: true, ownGeo: true };
-    pts.root.add(pts.sel);
+}
+// ---- picking by distance on the screen (not by hitting tiny shapes)
+const PICK_PX = 14;
+function toScreen(v, r) {
+  const p = v.clone().project(camera);
+  return { x: r.left + ((p.x + 1) / 2) * r.width, y: r.top + ((1 - p.y) / 2) * r.height, z: p.z };
+}
+function visibleFromCamera(wp) {
+  const o = camera.position;
+  const d = wp.clone().sub(o);
+  const dist = d.length();
+  ray.set(o, d.normalize());
+  const h = ray.intersectObject(pts.part, false)[0];
+  return !h || h.distance > dist - (0.01 + dist * 0.01);
+}
+function pickEl(cx, cy) {
+  if (!pts) return -1;
+  const r = canvas.getBoundingClientRect();
+  pts.part.updateWorldMatrix(true, false);
+  const W = (v) => pts.part.localToWorld(v.clone());
+  let best = -1;
+  let bd = PICK_PX;
+  if (pts.mode === 'face') {
+    ptr.set(((cx - r.left) / r.width) * 2 - 1, -((cy - r.top) / r.height) * 2 + 1);
+    ray.setFromCamera(ptr, camera);
+    const sh = ray.intersectObject(pts.part, false)[0];
+    if (sh) {
+      const id = pts.part.geometry.attributes.face.getX(sh.faceIndex * 3);
+      const idx = pts.els.findIndex((f) => f.id === id);
+      if (idx >= 0) return idx;
+    }
   }
+  pts.els.forEach((el, i) => {
+    let d;
+    let wp;
+    if (pts.mode === 'edge') {
+      const a = toScreen(W(posOf(el.gs[0])), r);
+      const b = toScreen(W(posOf(el.gs[1])), r);
+      const vx = b.x - a.x;
+      const vy = b.y - a.y;
+      const L = vx * vx + vy * vy || 1;
+      const t = Math.max(0, Math.min(1, ((cx - a.x) * vx + (cy - a.y) * vy) / L));
+      d = Math.hypot(cx - (a.x + vx * t), cy - (a.y + vy * t));
+      if (d >= bd) return;
+      wp = W(posOf(el.gs[0]).lerp(posOf(el.gs[1]), t));
+    } else {
+      wp = W(pts.centers[i]);
+      const s = toScreen(wp, r);
+      d = Math.hypot(cx - s.x, cy - s.y);
+      if (d >= bd) return;
+    }
+    if (!visibleFromCamera(wp)) d += PICK_PX * 0.6; // hidden ones lose to visible ones
+    if (d < bd) {
+      bd = d;
+      best = i;
+    }
+  });
+  return best;
+}
+function setHover(i) {
+  if (!pts || pts.hover === i) return;
+  pts.hover = i;
+  updatePoints();
 }
 function selectEls(list, additive) {
   if (!pts) return;
@@ -370,6 +505,7 @@ function attachPivot() {
 
 function select(node) {
   state.selected = node || null;
+  state.multi = [];
   if (state.mode === 'pose' && node && isPart(node)) state.selected = nearestJoint(node);
   if (state.selected && isJoint(state.selected) && state.mode === 'build' && state.tool !== 'move') state.tool = 'move';
   refresh();
@@ -379,9 +515,62 @@ const nearestJoint = (n) => {
   return null;
 };
 
+// ---- picking several shapes at once (Shift / Ctrl / Cmd + click)
+const groupParts = () => [state.selected, ...state.multi].filter((o) => o && isPart(o) && o.parent);
+let multiOutlines = [];
+function setMultiOutlines() {
+  for (const o of multiOutlines) {
+    o.parent && o.parent.remove(o);
+    o.geometry.dispose();
+  }
+  multiOutlines = [];
+  if (!state.multi.length || state.mode !== 'build') return;
+  for (const part of groupParts()) {
+    const l = new THREE.LineSegments(new THREE.EdgesGeometry(part.geometry, 20), outlineMat);
+    l.userData.helper = true;
+    l.renderOrder = 15;
+    part.add(l);
+    multiOutlines.push(l);
+  }
+}
+function toggleGroup(part) {
+  const cur = state.selected;
+  if (!cur || !isPart(cur)) return select(part);
+  if (part === cur) {
+    if (!state.multi.length) return select(null);
+    state.selected = state.multi.pop();
+  } else if (state.multi.includes(part)) state.multi.splice(state.multi.indexOf(part), 1);
+  else state.multi.push(part);
+  refresh();
+}
+function selectAllParts() {
+  const all = [];
+  model.traverse((o) => isPart(o) && all.push(o));
+  if (!all.length) return;
+  state.selected = all[0];
+  state.multi = all.slice(1);
+  refresh();
+  toast(`${all.length} shapes picked`);
+}
+let groupMode = false; // the gizmo moves every picked shape together
+function attachGroup() {
+  const ps = groupParts();
+  const c = new THREE.Vector3();
+  ps.forEach((o) => c.add(worldPos(o)));
+  c.divideScalar(ps.length);
+  pivot.position.copy(c);
+  pivot.quaternion.identity();
+  pivot.scale.set(1, 1, 1);
+  transform.attach(pivot);
+  transform.setMode(state.tool === 'turn' ? 'rotate' : state.tool === 'size' ? 'scale' : 'translate');
+  transform.setSpace('world');
+}
+
 function applyTool() {
   const n = state.selected;
   setOutline(n);
+  setMultiOutlines();
+  groupMode = false;
   if (!(state.mode === 'build' && state.tool === 'points' && n && isPart(n))) clearPoints();
   for (const j of jointsList()) setMarkerColor(j, j === n ? 0xff4d00 : 0xff9f1c);
   transform.setTranslationSnap(state.snap ? 0.05 : null);
@@ -402,6 +591,10 @@ function applyTool() {
     transform.setMode('translate');
     transform.setSpace('world');
     return;
+  }
+  if (state.multi.length && state.mode === 'build' && state.tool !== 'points' && state.tool !== 'paint') {
+    groupMode = true;
+    return attachGroup();
   }
   if (state.tool === 'points') {
     if (!pts || pts.part !== n || pts.geo !== n.geometry || pts.mode !== state.emode) buildPoints(n);
@@ -432,20 +625,33 @@ function onDragStart() {
 function beginDrag(o) {
   drag = { obj: o };
   if (o && isJoint(o) && state.mode === 'build' && !state.boneCarry) drag.held = kids(o).map((k) => [k, worldOf(k)]);
-  if (o === pivot && pts) {
+  if (o === pivot && groupMode) {
+    drag.group = { C: pivot.position.clone(), W0: groupParts().map((q) => [q, worldOf(q)]) };
+  } else if (o === pivot && pts) {
     pts.part.updateWorldMatrix(true, false);
     drag.pts = { C: pivot.position.clone(), W0: selGroups().map((gi) => [gi, pts.part.localToWorld(posOf(gi))]) };
   }
 }
 function onObjectChange(o = transform.object) {
   if (!o) return;
-  if (o === pivot) return onPivotChange();
+  if (o === pivot) return groupMode ? onGroupChange() : onPivotChange();
   if (state.mode === 'pose') return;
   if (isJoint(o)) {
     if (drag && drag.held) drag.held.forEach(([k, W]) => setWorld(k, W));
     updateBoneLine(o);
     syncTwin(o, false, state.boneCarry);
   } else syncTwin(o);
+}
+function onGroupChange() {
+  if (!drag || !drag.group) return;
+  const { C, W0 } = drag.group;
+  const D = new THREE.Matrix4()
+    .compose(pivot.position, pivot.quaternion, pivot.scale)
+    .multiply(new THREE.Matrix4().makeTranslation(-C.x, -C.y, -C.z));
+  for (const [q, W] of W0) {
+    setWorld(q, D.clone().multiply(W));
+    syncTwin(q);
+  }
 }
 function onPivotChange() {
   if (!pts || !drag || !drag.pts) return;
@@ -471,6 +677,18 @@ function onDragEnd() {
   const o = drag && drag.obj;
   drag = null;
   if (!o || state.mode === 'pose') return;
+  if (o === pivot && groupMode) {
+    for (const q of groupParts()) {
+      if (!(q.scale.x === 1 && q.scale.y === 1 && q.scale.z === 1)) {
+        bakeScale(q.geometry, q.scale, q.userData.texScale);
+        q.scale.set(1, 1, 1);
+        syncTwin(q, true);
+      }
+    }
+    commit();
+    refresh();
+    return;
+  }
   if (o === pivot) {
     commit();
     attachPivot();
@@ -676,10 +894,10 @@ canvas.addEventListener(
       return e.button === 2 ? endModal(false) : e.button === 0 ? endModal(true) : undefined;
     }
     if (state.mode === 'play') return;
-    if (!e.shiftKey || e.button !== 0 || state.tool !== 'points' || state.mode !== 'build' || !pts || transform.axis) return;
+    if (!(e.shiftKey || e.ctrlKey || e.metaKey || state.boxSel) || e.button !== 0 || state.tool !== 'points' || state.mode !== 'build' || !pts || transform.axis) return;
     e.stopImmediatePropagation();
     down = null;
-    marquee = { x0: e.clientX, y0: e.clientY, x1: e.clientX, y1: e.clientY };
+    marquee = { x0: e.clientX, y0: e.clientY, x1: e.clientX, y1: e.clientY, add: e.shiftKey || e.ctrlKey || e.metaKey };
     canvas.setPointerCapture(e.pointerId);
   },
   true,
@@ -706,15 +924,20 @@ canvas.addEventListener('pointerup', (e) => {
   const [xa, xb] = [Math.min(m.x0, m.x1), Math.max(m.x0, m.x1)];
   const [ya, yb] = [Math.min(m.y0, m.y1), Math.max(m.y0, m.y1)];
   const hit = [];
-  const v = new THREE.Vector3();
-  pts.handles.forEach((h, i) => {
-    h.getWorldPosition(v).project(camera);
-    const sx = r.left + ((v.x + 1) / 2) * r.width;
-    const sy = r.top + ((1 - v.y) / 2) * r.height;
-    if (v.z < 1 && sx >= xa && sx <= xb && sy >= ya && sy <= yb && !psel.includes(i)) hit.push(i);
+  pts.part.updateWorldMatrix(true, false);
+  pts.centers.forEach((c, i) => {
+    const sp = toScreen(pts.part.localToWorld(c.clone()), r);
+    if (sp.z < 1 && sp.x >= xa && sp.x <= xb && sp.y >= ya && sp.y <= yb) hit.push(i);
   });
-  selectEls(hit, true);
+  // adding: only the new ones (so a second box never un-picks); plain box: replace
+  selectEls(m.add ? hit.filter((i) => !psel.includes(i)) : hit, m.add);
 });
+canvas.addEventListener('pointermove', (e) => {
+  if (state.mode !== 'build' || state.tool !== 'points' || !pts || marquee || modal || transform.dragging || (e.buttons & 7)) return;
+  if (transform.axis) return setHover(-1);
+  setHover(pickEl(e.clientX, e.clientY));
+});
+canvas.addEventListener('pointerleave', () => setHover(-1));
 canvas.addEventListener('pointerdown', (e) => {
   down = { x: e.clientX, y: e.clientY, onGizmo: !!transform.axis, button: e.button };
 });
@@ -758,18 +981,9 @@ function pick(e) {
     return commit();
   }
   if (state.tool === 'points' && state.mode === 'build' && pts) {
-    const hit = ray.intersectObjects(pts.handles, false)[0];
-    if (hit && e.altKey && state.advanced) return loopSelect(hit.object.userData.pel, e.shiftKey);
-    if (hit) return selectEls([hit.object.userData.pel], e.shiftKey);
-    if (state.emode === 'face') {
-      // click right on a face of the shape
-      const sh = ray.intersectObject(pts.part, false)[0];
-      if (sh) {
-        const id = pts.part.geometry.attributes.face.getX(sh.faceIndex * 3);
-        const idx = pts.els.findIndex((f) => f.id === id);
-        if (idx >= 0) return e.altKey && state.advanced ? loopSelect(idx, e.shiftKey) : selectEls([idx], e.shiftKey);
-      }
-    }
+    const add = e.shiftKey || e.ctrlKey || e.metaKey; // add to / take away from what is picked
+    const hit = pickEl(e.clientX, e.clientY);
+    if (hit >= 0) return e.altKey && state.advanced ? loopSelect(hit, add) : selectEls([hit], add);
   }
   if (flags.bones) {
     const ms = jointsList().map((j) => j.userData.marker).filter((m) => m && m.visible);
@@ -779,7 +993,7 @@ function pick(e) {
   const parts = [];
   model.traverse((o) => isPart(o) && parts.push(o));
   const hit = ray.intersectObjects(parts, false)[0];
-  if (hit) return select(hit.object);
+  if (hit) return e.shiftKey || e.ctrlKey || e.metaKey ? toggleGroup(hit.object) : select(hit.object);
   if (state.tool === 'points' && psel.length) return selectEls([], false);
   select(null);
 }
@@ -1230,18 +1444,24 @@ function frameModel() {
 function duplicate() {
   const n = state.selected;
   if (!n || !isPart(n)) return;
-  const d = serializeNode(n);
-  const c = deserialize(d, n.parent, { fresh: true });
-  c.position.x += 0.15;
-  c.name = n.name + ' copy';
-  select(c);
+  const copies = groupParts().map((q) => {
+    const c = deserialize(serializeNode(q), q.parent, { fresh: true });
+    c.position.x += 0.15;
+    c.name = q.name + ' copy';
+    return c;
+  });
+  select(copies[0]);
+  state.multi = copies.slice(1);
+  refresh();
   commit();
 }
 function del() {
   const n = state.selected;
   if (!n || !isPart(n)) return;
+  const all = groupParts();
   state.selected = null;
-  removeNode(n);
+  state.multi = [];
+  for (const q of all) q.parent && removeNode(q);
   commit();
 }
 function makeMirror() {
@@ -1610,7 +1830,7 @@ function renderToolbar() {
       ? `<span class="label">🦴 ${esc(n.name)} — drag the rings to bend</span>`
       : `<span class="label">Click a body part to bend it</span>`;
   } else if (!n) {
-    html = `<span class="label">👆 Click a shape to pick it</span>`;
+    html = `<span class="label">👆 Click a shape to pick it · Shift+click picks more</span><button class="tool" data-act="selallparts"><span>☑️</span>All shapes</button>`;
   } else if (isJoint(n)) {
     html = `<span class="label">🦴 ${esc(n.name)} — drag arrows to move the bone</span>`;
   } else if (state.tool === 'points') {
@@ -1621,14 +1841,16 @@ function renderToolbar() {
     const can = pts && psel.length && (state.emode !== 'dot' || state.advanced);
     const hint = psel.length
       ? `${psel.length} picked`
-      : state.emode === 'face' ? 'Click a face' : state.emode === 'edge' ? 'Click a diamond' : 'Click a dot';
+      : state.emode === 'face' ? 'Click a face' : state.emode === 'edge' ? 'Click an edge' : 'Click a dot';
     html =
       `<button class="tool" data-act="tool:move"><span>◀</span>Done</button><i class="sep"></i>` +
       em('dot', '⚪', 'Dots') + em('edge', '➖', 'Edges') + em('face', '▣', 'Faces') +
       `<i class="sep"></i>` +
       gz('move', '↔️', 'Move') + gz('turn', '🔄', 'Turn') + gz('size', '⤡', 'Size') +
       `<i class="sep"></i><button class="tool" data-act="extrude" ${can ? '' : 'disabled'}><span>⬆️</span>Extrude</button>` +
-      `<span class="label full">${hint} · Shift+click or Shift+drag = pick more</span>`;
+      `<i class="sep"></i><button class="tool ${state.boxSel ? 'on' : ''}" data-act="boxsel" title="Drag a box to pick many. Right-drag moves the picture, scroll zooms."><span>⬚</span>Box</button>` +
+      `<button class="tool" data-act="selall" title="A"><span>☑️</span>All</button><button class="tool" data-act="selnone" title="Alt+A"><span>☐</span>None</button><button class="tool" data-act="selinv" title="Ctrl+I"><span>🔁</span>Flip</button>` +
+      `<span class="label full">${hint} · Shift+click = pick more · Shift+drag or Box = drag a box</span>`;
   } else {
     const t = (id, icon, label) =>
       `<button class="tool ${state.tool === id ? 'on' : ''}" data-act="tool:${id}"><span>${icon}</span>${label}</button>`;
@@ -1638,7 +1860,9 @@ function renderToolbar() {
       t('size', '⤡', 'Size') +
       t('points', '✏️', 'Points') +
       (state.advanced ? t('paint', '🖌️', 'Paint') : '') +
-      (state.tool === 'paint' ? `<span class="label">Click a face to paint it <i class="chip" style="background:${state.brushColor}"></i></span>` : '');
+      (state.tool === 'paint' ? `<span class="label">Click a face to paint it <i class="chip" style="background:${state.brushColor}"></i></span>` : '') +
+      `<i class="sep"></i><button class="tool" data-act="selallparts" title="A"><span>☑️</span>All shapes</button>` +
+      (state.multi.length ? `<span class="label">${state.multi.length + 1} shapes picked · move, turn, size, color or delete them together</span>` : `<span class="label">Shift+click adds more shapes</span>`);
   }
   el.innerHTML = html;
   el.classList.toggle('hidden', false);
@@ -1858,6 +2082,10 @@ document.addEventListener('click', (e) => {
     case 'delbone': return deleteBone(n);
     case 'resetpose': return resetPose();
     case 'delsel': return deleteSel();
+    case 'selallparts': return selectAllParts();
+    case 'boxsel':
+      state.boxSel = !state.boxSel;
+      return renderToolbar();
     case 'selall': return selectAll();
     case 'selnone': return selectNone();
     case 'selinv': return selectFlip();
@@ -1870,10 +2098,10 @@ document.addEventListener('click', (e) => {
       if (n) unlink(n);
       return commit();
     case 'color':
-      if (n) setPaint(n, { color: arg });
+      for (const q of n ? groupParts() : []) setPaint(q, { color: arg });
       return commit();
     case 'pat':
-      if (n) setPaint(n, { pattern: arg, image: null });
+      for (const q of n ? groupParts() : []) setPaint(q, { pattern: arg, image: null });
       return commit();
     case 'pic': return $('#picFile').click();
     case 'dup': return duplicate();
@@ -2006,7 +2234,8 @@ window.addEventListener('keydown', (e) => {
     e.preventDefault();
     state.tool = editing ? 'move' : 'points';
     refresh();
-  } else if (c === 'KeyG' || c === 'KeyR' || c === 'KeyS') startModal({ KeyG: 'move', KeyR: 'turn', KeyS: 'size' }[c]);
+  } else if (c === 'KeyA' && !editing) selectAllParts();
+  else if (c === 'KeyG' || c === 'KeyR' || c === 'KeyS') startModal({ KeyG: 'move', KeyR: 'turn', KeyS: 'size' }[c]);
   else if (n && isJoint(n) && c === 'KeyE') addBone();
   else if (n && isJoint(n) && (c === 'KeyX' || del_)) deleteBone(n);
   else if (editing) {
@@ -2081,5 +2310,5 @@ window.addEventListener('drop', (e) => {
   refresh();
   frame();
   // handy for testing / poking around in the console
-  window.__bb = { THREE, pts: () => pts, psel: () => psel, pivot, selectEls, loadDocJSON: (j) => loadDoc(JSON.parse(j)), state, model, scene, camera, orbit, transform, select, byId, registry, docJSON, applyPose, setMode, commit, undo, redo };
+  window.__bb = { THREE, pts: () => pts, psel: () => psel, pivot, selectEls, pickEl, loadDocJSON: (j) => loadDoc(JSON.parse(j)), state, model, scene, camera, orbit, transform, select, byId, registry, docJSON, applyPose, setMode, commit, undo, redo };
 })();
