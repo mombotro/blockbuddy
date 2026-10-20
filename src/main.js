@@ -11,6 +11,7 @@ import {
   geometrySize,
   bakeScale,
   sliceGeometry,
+  cutSegments,
   gapMiddle,
 } from './geom.js';
 import { PATTERN_LIST, patternThumb } from './textures.js';
@@ -894,7 +895,7 @@ canvas.addEventListener(
       return e.button === 2 ? endModal(false) : e.button === 0 ? endModal(true) : undefined;
     }
     if (state.mode === 'play') return;
-    if (!(e.shiftKey || e.ctrlKey || e.metaKey || state.boxSel) || e.button !== 0 || state.tool !== 'points' || state.mode !== 'build' || !pts || transform.axis) return;
+    if (lcut || !(e.shiftKey || e.ctrlKey || e.metaKey || state.boxSel) || e.button !== 0 || state.tool !== 'points' || state.mode !== 'build' || !pts || transform.axis) return;
     e.stopImmediatePropagation();
     down = null;
     marquee = { x0: e.clientX, y0: e.clientY, x1: e.clientX, y1: e.clientY, add: e.shiftKey || e.ctrlKey || e.metaKey };
@@ -1393,19 +1394,91 @@ function extrudeSel() {
   toast('Extruded! Drag the arrows to pull it out. ⬆️');
 }
 // Loop cut: add a new ring of dots across the width, height or depth of a part.
+// ---- loop cut: the new ring floats with the mouse until you click to set it
+let lcut = null; // { part, axis, c, lo, hi, center, line }
 function sliceSelected(axis) {
   const n = state.selected;
   if (!n || !isPart(n)) return;
-  const g = sliceGeometry(n.geometry, axis, gapMiddle(n.geometry, axis), n.userData.texScale);
+  cancelCut();
+  const bb = new THREE.Box3().setFromBufferAttribute(n.geometry.attributes.position);
+  const line = fatLines(SEL_COLOR, 4.5, { depthTest: false, offset: false });
+  line.renderOrder = 45;
+  n.add(line);
+  lcut = { part: n, axis, c: gapMiddle(n.geometry, axis), lo: bb.min.getComponent(axis), hi: bb.max.getComponent(axis), center: bb.getCenter(new THREE.Vector3()), line };
+  drawCut();
+  renderToolbar();
+  toast('✂️ Move the mouse to place the new ring, then click to set it. Esc cancels.');
+}
+function drawCut() {
+  if (!lcut) return;
+  const arr = [];
+  for (const [a, b] of cutSegments(lcut.part.geometry, lcut.axis, lcut.c)) arr.push(...a, ...b);
+  setFat(lcut.line, arr);
+}
+function cancelCut() {
+  if (!lcut) return;
+  const { line } = lcut;
+  line.parent && line.parent.remove(line);
+  line.geometry.dispose();
+  fatMats.delete(line.material);
+  line.material.dispose();
+  lcut = null;
+  renderToolbar();
+}
+function moveCut(e) {
+  if (!lcut) return;
+  const r = canvas.getBoundingClientRect();
+  ptr.set(((e.clientX - r.left) / r.width) * 2 - 1, -((e.clientY - r.top) / r.height) * 2 + 1);
+  ray.setFromCamera(ptr, camera);
+  const part = lcut.part;
+  part.updateWorldMatrix(true, false);
+  const inv = part.matrixWorld.clone().invert();
+  const O = ray.ray.origin.clone().applyMatrix4(inv);
+  const D = ray.ray.direction.clone().transformDirection(inv).normalize();
+  const u = new THREE.Vector3();
+  u.setComponent(lcut.axis, 1);
+  const w0 = lcut.center.clone().sub(O);
+  const b = u.dot(D);
+  const denom = 1 - b * b;
+  if (denom < 1e-3) return; // looking straight down the axis: no way to tell
+  const t = (b * D.dot(w0) - u.dot(w0)) / denom;
+  let c = lcut.center.getComponent(lcut.axis) + t;
+  if (state.snap) c = Math.round(c / 0.05) * 0.05;
+  const m = (lcut.hi - lcut.lo) * 0.01 + 1e-4;
+  c = Math.min(lcut.hi - m, Math.max(lcut.lo + m, c));
+  if (Math.abs(c - lcut.c) < 1e-6) return;
+  lcut.c = c;
+  drawCut();
+}
+function commitCut() {
+  if (!lcut) return;
+  const { part: n, axis, c } = lcut;
+  cancelCut();
+  const g = sliceGeometry(n.geometry, axis, c, n.userData.texScale);
   const oldIds = new Set(n.geometry.attributes.face.array);
   n.geometry.dispose();
   n.geometry = g;
   inheritFaceColors(n, oldIds, null, g.userData.farIds);
   syncTwin(n, true);
   state.tool = 'points';
-  toast('New ring of dots! Drag them to reshape. ✏️');
+  toast('New ring set! Drag the dots to reshape. ✏️');
   commit();
 }
+canvas.addEventListener('pointermove', moveCut);
+canvas.addEventListener(
+  'pointerdown',
+  (e) => {
+    if (!lcut) return;
+    e.stopImmediatePropagation();
+    e.preventDefault();
+    down = null;
+    if (e.button === 0) {
+      moveCut(e);
+      commitCut();
+    } else if (e.button === 2) cancelCut();
+  },
+  true,
+);
 
 function startWith(id) {
   if (partCount() > 0 && !confirm('Start something new? Your current model will be replaced. (You can undo.)')) return;
@@ -1820,7 +1893,9 @@ function renderToolbar() {
   const n = state.selected;
   const el = $('#toolbar');
   let html = '';
-  if (modal) {
+  if (lcut) {
+    html = `<span class="label full" style="font-size:15px">✂️ Move the mouse to place the new ring · click = set it · Esc or right-click = cancel</span>`;
+  } else if (modal) {
     html = `<span class="label full" style="font-size:15px">${esc(modal.label)} · X Y Z = axis · type a number · click or Enter = OK · Esc = cancel</span>`;
   } else if (state.sticking) {
     const p = byId(state.sticking);
@@ -2020,6 +2095,7 @@ document.addEventListener('click', (e) => {
   if (!b) return;
   const [act, arg] = b.dataset.act.split(':');
   const n = state.selected;
+  if (lcut && act !== 'slice') cancelCut();
   switch (act) {
     case 'add': return addShape(arg);
     case 'start': return startWith(arg);
@@ -2203,6 +2279,10 @@ const NUMPAD_VIEWS = { Numpad1: 'front', Numpad3: 'side', Numpad7: 'top' };
 window.addEventListener('keydown', (e) => {
   if (/input|textarea/i.test(document.activeElement.tagName) && document.activeElement.type !== 'checkbox') return;
   if (state.mode === 'play') return;
+  if (lcut) {
+    if (e.code === 'Escape') cancelCut();
+    return;
+  }
   if (modal) return modalKey(e);
   const mod = e.metaKey || e.ctrlKey;
   const c = e.code;
@@ -2310,5 +2390,5 @@ window.addEventListener('drop', (e) => {
   refresh();
   frame();
   // handy for testing / poking around in the console
-  window.__bb = { THREE, pts: () => pts, psel: () => psel, pivot, selectEls, pickEl, loadDocJSON: (j) => loadDoc(JSON.parse(j)), state, model, scene, camera, orbit, transform, select, byId, registry, docJSON, applyPose, setMode, commit, undo, redo };
+  window.__bb = { THREE, pts: () => pts, psel: () => psel, pivot, selectEls, pickEl, commitCut, loadDocJSON: (j) => loadDoc(JSON.parse(j)), state, model, scene, camera, orbit, transform, select, byId, registry, docJSON, applyPose, setMode, commit, undo, redo };
 })();
